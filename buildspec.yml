@@ -1,21 +1,8 @@
 version: 0.2
 phases:
-  install:
-    commands:
-      - echo "Installing dependencies..."
-      # Add any pre-build commands here
-  pre_build:
-    commands:
-      - echo "Preparing build environment..."
   build:
     commands:
-      - echo "Building the Docker image..."
-      - docker build -t my-text-to-image .
-      # Optionally tag the image with a unique tag (e.g., commit ID)
-  post_build:
-    commands:
-      - echo "Build completed."
-      # Output variables or perform additional steps if needed
+      - echo "Pipeline test successful" > build_output.txt
 artifacts:
   files:
-    - '**/*'
+    - build_output.txt

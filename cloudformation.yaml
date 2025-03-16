@@ -1,167 +1,82 @@
-AWSTemplateFormatVersion: '2010-09-09'
-Description: >
-  CloudFormation template for deploying the text-to-image synthesis model and API Gateway.
-
 Parameters:
-  SageMakerModelName:
+  ModelArtifactUrl:
     Type: String
-    Default: "TextToImageModel"
-    Description: Name of the SageMaker model.
-  SageMakerEndpointConfigName:
+    Description: S3 URL of the model artifact
+  ContainerImage:
     Type: String
-    Default: "TextToImageEndpointConfig"
-    Description: Name of the SageMaker endpoint configuration.
-  SageMakerEndpointName:
-    Type: String
-    Default: "TextToImageEndpoint"
-    Description: Name of the SageMaker endpoint.
-  ApiName:
-    Type: String
-    Default: "TextToImageAPI"
-    Description: Name of the API Gateway REST API.
-  ModelImageUri:
-    Type: String
-    Default: "111222333444.dkr.ecr.us-east-1.amazonaws.com my-text-to-image:latest"
-    Description: "ECR URI for the Docker container with inference code (update later)."
-  ModelDataUrl:
-    Type: String
-    Default: ""
-    Description: "S3 URL for model artifacts (if applicable)."
+    Description: ECR image URL for the model container
 
 Resources:
-  SageMakerExecutionRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: SageMakerExecutionRoleForTextToImage
-      AssumeRolePolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: sagemaker.amazonaws.com
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/AmazonS3FullAccess
-        - arn:aws:iam::aws:policy/AmazonSageMakerFullAccess
-
   SageMakerModel:
-    Type: AWS::SageMaker::Model
+    Type: 'AWS::SageMaker::Model'
     Properties:
-      ModelName: !Ref SageMakerModelName
-      ExecutionRoleArn: !GetAtt SageMakerExecutionRole.Arn
+      ExecutionRoleArn: !GetAtt SageMakerRole.Arn
+      ModelName: !Sub 'my-model-${AWS::StackName}'
       PrimaryContainer:
-        Image: !Ref ModelImageUri
-        ModelDataUrl: !Ref ModelDataUrl
+        Image: !Ref ContainerImage
+        ModelDataUrl: !Ref ModelArtifactUrl
 
   SageMakerEndpointConfig:
-    Type: AWS::SageMaker::EndpointConfig
+    Type: 'AWS::SageMaker::EndpointConfig'
     Properties:
-      EndpointConfigName: !Ref SageMakerEndpointConfigName
+      EndpointConfigName: !Sub 'my-endpoint-config-${AWS::StackName}'
       ProductionVariants:
-        - VariantName: AllTraffic
+        - InitialInstanceCount: 1
+          InstanceType: ml.m5.large
           ModelName: !Ref SageMakerModel
-          InitialInstanceCount: 1
-          InstanceType: ml.m5.xlarge
-          InitialVariantWeight: 1.0
+          VariantName: 'AllTraffic'
 
   SageMakerEndpoint:
-    Type: AWS::SageMaker::Endpoint
+    Type: 'AWS::SageMaker::Endpoint'
     Properties:
-      EndpointName: !Ref SageMakerEndpointName
+      EndpointName: !Sub 'my-endpoint-${AWS::StackName}'
       EndpointConfigName: !Ref SageMakerEndpointConfig
 
-  ApiGatewayInvokeSageMakerRole:
-    Type: AWS::IAM::Role
+  InferenceLambda:
+    Type: 'AWS::Lambda::Function'
     Properties:
-      AssumeRolePolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service:
-                - apigateway.amazonaws.com
-            Action: sts:AssumeRole
-      Policies:
-        - PolicyName: InvokeSageMakerPolicy
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Effect: Allow
-                Action:
-                  - sagemaker:InvokeEndpoint
-                Resource: !Sub "arn:aws:sagemaker:${AWS::Region}:${AWS::AccountId}:endpoint/${SageMakerEndpointName}"
+      FunctionName: !Sub 'inference-lambda-${AWS::StackName}'
+      Runtime: python3.8
+      Code:
+        ZipFile: |
+          # Lambda function code to call SageMaker endpoint
+      Environment:
+        Variables:
+          SAGEMAKER_ENDPOINT_NAME: !Ref SageMakerEndpoint
 
-  TextToImageApi:
-    Type: AWS::ApiGateway::RestApi
+  APIGatewayRestAPI:
+    Type: 'AWS::ApiGateway::RestApi'
     Properties:
-      Name: !Ref ApiName
-      Description: API Gateway for text-to-image synthesis and metrics.
+      Name: !Sub 'my-project-API-${AWS::StackName}'
 
-  InferenceResource:
-    Type: AWS::ApiGateway::Resource
+  APIGatewayResource:
+    Type: 'AWS::ApiGateway::Resource'
     Properties:
-      ParentId: !GetAtt TextToImageApi.RootResourceId
-      PathPart: inference
-      RestApiId: !Ref TextToImageApi
+      RestApiId: !Ref APIGatewayRestAPI
+      ParentId: !GetAtt APIGatewayRestAPI.RootResourceId
+      PathPart: 'predict'
 
-  MetricsResource:
-    Type: AWS::ApiGateway::Resource
+  APIGatewayMethod:
+    Type: 'AWS::ApiGateway::Method'
     Properties:
-      ParentId: !GetAtt TextToImageApi.RootResourceId
-      PathPart: metrics
-      RestApiId: !Ref TextToImageApi
-
-  InferenceMethod:
-    Type: AWS::ApiGateway::Method
-    Properties:
-      RestApiId: !Ref TextToImageApi
-      ResourceId: !Ref InferenceResource
+      RestApiId: !Ref APIGatewayRestAPI
+      ResourceId: !Ref APIGatewayResource
       HttpMethod: POST
       AuthorizationType: NONE
       Integration:
-        Type: AWS
+        Type: LAMBDA
         IntegrationHttpMethod: POST
-        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:sagemaker:path/endpoints/${SageMakerEndpointName}/invocations"
-        Credentials: !GetAtt ApiGatewayInvokeSageMakerRole.Arn
-        PassthroughBehavior: WHEN_NO_MATCH
-        RequestTemplates:
-          application/json: |
-            {
-              "instances": $input.json('$.instances')
-            }
-        IntegrationResponses:
-          - StatusCode: 200
-            ResponseTemplates:
-              application/json: $input.json('$')
-      MethodResponses:
-        - StatusCode: 200
+        Uri: !Sub 'arn:aws:apigateway:$AWS::Region:lambda:path/2015-03-31/functions/${InferenceLambda.Arn}/invocations'
 
-
-  MetricsMethod:
-    Type: AWS::ApiGateway::Method
+  APIGatewayDeployment:
+    Type: 'AWS::ApiGateway::Deployment'
     Properties:
-      RestApiId: !Ref TextToImageApi
-      ResourceId: !Ref MetricsResource
-      HttpMethod: GET
-      AuthorizationType: NONE
-      Integration:
-        Type: MOCK
-        IntegrationResponses:
-          - StatusCode: 200
-            ResponseTemplates:
-              application/json: |
-                {
-                  "status": "ok",
-                  "message": "Metrics are not available yet."
-                }
-  ApiDeployment:
-    Type: AWS::ApiGateway::Deployment
-    DependsOn: [InferenceMethod, MetricsMethod]
-    Properties:
-      RestApiId: !Ref TextToImageApi
+      RestApiId: !Ref APIGatewayRestAPI
       StageName: prod
 
-Outputs:
-  ApiEndpoint:
-    Description: "URL of the deployed API Gateway endpoint"
-    Value: !Sub "https://${TextToImageApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
+  APIGatewayStage:
+    Type: 'AWS::ApiGateway::Stage'
+    Properties:
+      RestApiId: !Ref APIGatewayRestAPI
+      StageName: prod
+      DeploymentId: !Ref APIGatewayDeployment
