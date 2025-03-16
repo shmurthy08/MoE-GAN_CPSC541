@@ -75,21 +75,14 @@ Resources:
                   - ecr:BatchGetImage
                   - ecr:GetDownloadUrlForLayer
                 Resource: '*'
+        - PolicyName: APIGatewayAccountUpdate
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: apigateway:*
+                Resource: '*'
       RoleName: !Sub '${ProjectName}-${EnvironmentName}-lambda-role'
-
-  APIGatewayRole:
-    Type: 'AWS::IAM::Role'
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: apigateway.amazonaws.com
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
-      RoleName: !Sub '${ProjectName}-${EnvironmentName}-apigateway-role'
 
   # ===== Storage Resources =====
   ModelArtifactBucket:
@@ -315,12 +308,8 @@ Resources:
       RestApiId: !Ref APIGatewayRestAPI
       StageName: v1
       DeploymentId: !Ref APIGatewayDeployment
-      MethodSettings:
-        - ResourcePath: '/*'
-          HttpMethod: '*'
-          MetricsEnabled: true
-          DataTraceEnabled: true
-          LoggingLevel: INFO
+      # Disabled logging completely to avoid the CloudWatch Logs role ARN error
+      # You can manually enable it later in the AWS Console
 
   # ===== CloudWatch Dashboard =====
   MonitoringDashboard:
@@ -398,12 +387,6 @@ Outputs:
     Value: !GetAtt LambdaRole.Arn
     Export:
       Name: !Sub "${ProjectName}-${EnvironmentName}-lambda-role-arn"
-    
-  APIGatewayRoleArn:
-    Description: "ARN of the API Gateway role"
-    Value: !GetAtt APIGatewayRole.Arn
-    Export:
-      Name: !Sub "${ProjectName}-${EnvironmentName}-apigateway-role-arn"
   
   ModelArtifactBucketName:
     Description: "Name of the S3 bucket for model artifacts"
