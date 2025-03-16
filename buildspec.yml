@@ -1,8 +1,88 @@
 version: 0.2
+
+env:
+  variables:
+    PROJECT_NAME: "gan-text-to-image"
+    ENVIRONMENT_NAME: "dev"
+    ECR_REPOSITORY_NAME: "${PROJECT_NAME}-${ENVIRONMENT_NAME}-repository"
+    CLOUDFORMATION_STACK_NAME: "${PROJECT_NAME}-${ENVIRONMENT_NAME}-stack"
+  
 phases:
+  install:
+    runtime-versions:
+      python: 3.8
+    commands:
+      - echo Installing dependencies...
+      - pip install --upgrade pip
+      - pip install boto3 sagemaker awscli
+  
+  pre_build:
+    commands:
+      - echo Setting up variables...
+      - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - ECR_REPOSITORY_URI=${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${ECR_REPOSITORY_NAME}
+      - COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
+      - IMAGE_TAG=${COMMIT_HASH:=latest}
+      - STACK_EXISTS=$(aws cloudformation describe-stacks --stack-name ${CLOUDFORMATION_STACK_NAME} 2>&1 | grep -c "Stack with id ${CLOUDFORMATION_STACK_NAME} does not exist" || true)
+      - echo Checking if ECR repository exists...
+      - REPO_EXISTS=$(aws ecr describe-repositories --repository-names ${ECR_REPOSITORY_NAME} 2>&1 | grep -c "RepositoryNotFoundException" || true)
+      - |
+        if [ "$REPO_EXISTS" == "1" ]; then
+          echo "Creating ECR repository..."
+          aws ecr create-repository --repository-name ${ECR_REPOSITORY_NAME}
+        fi
+      - echo Logging in to Amazon ECR...
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin ${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com
+      
   build:
     commands:
-      - echo "Pipeline test successful" > build_output.txt
+      - echo Build started on `date`
+      - echo Building the Docker image...
+      - docker build -t ${ECR_REPOSITORY_URI}:${IMAGE_TAG} .
+      - docker tag ${ECR_REPOSITORY_URI}:${IMAGE_TAG} ${ECR_REPOSITORY_URI}:latest
+      
+      - |
+        if [ "$STACK_EXISTS" == "1" ]; then
+          echo "Creating CloudFormation stack..."
+          aws cloudformation create-stack \
+            --stack-name ${CLOUDFORMATION_STACK_NAME} \
+            --template-body file://cloudformation.yaml \
+            --parameters ParameterKey=ProjectName,ParameterValue=${PROJECT_NAME} \
+                         ParameterKey=EnvironmentName,ParameterValue=${ENVIRONMENT_NAME} \
+                         ParameterKey=ContainerImage,ParameterValue="" \
+                         ParameterKey=ModelArtifactUrl,ParameterValue="" \
+                         ParameterKey=InstanceType,ParameterValue="ml.t2.medium" \
+            --capabilities CAPABILITY_NAMED_IAM
+          
+          echo "Waiting for stack creation to complete..."
+          aws cloudformation wait stack-create-complete --stack-name ${CLOUDFORMATION_STACK_NAME}
+        else
+          echo "CloudFormation stack already exists"
+        fi
+  
+  post_build:
+    commands:
+      - echo Build completed on `date`
+      - echo Pushing the Docker image...
+      - docker push ${ECR_REPOSITORY_URI}:${IMAGE_TAG}
+      - docker push ${ECR_REPOSITORY_URI}:latest
+      - |
+        echo Creating build output file with ECR image URI...
+        cat > build_output.json << EOF
+        {
+          "ECRImageURI": "${ECR_REPOSITORY_URI}:${IMAGE_TAG}"
+        }
+        EOF
+
 artifacts:
   files:
-    - build_output.txt
+    - cloudformation.yaml
+    - build_output.json
+    - appspec.yml
+    - scripts/**/*
+    - templates/**/*
+  discard-paths: no
+
+cache:
+  paths:
+    - '/root/.cache/pip/**/*'

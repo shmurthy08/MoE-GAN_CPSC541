@@ -1,82 +1,418 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Infrastructure for Text-to-Image GAN Model with SageMaker and API Gateway'
+
 Parameters:
+  ProjectName:
+    Type: String
+    Default: gan-text-to-image
+    Description: Name of the project for resource naming
+  
+  EnvironmentName:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, test, prod]
+    Description: Environment name
+  
   ModelArtifactUrl:
     Type: String
-    Description: S3 URL of the model artifact
+    Default: ''
+    Description: S3 URL of the model artifact (optional for initial setup)
+  
   ContainerImage:
     Type: String
-    Description: ECR image URL for the model container
+    Default: ''
+    Description: ECR image URL for the model container (optional for initial setup)
+  
+  InstanceType:
+    Type: String
+    Default: ml.t2.medium
+    Description: SageMaker instance type for the endpoint (free tier eligible)
 
 Resources:
+  # ===== IAM Roles =====
+  SageMakerRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: sagemaker.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSageMakerFullAccess
+        - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+      RoleName: !Sub '${ProjectName}-${EnvironmentName}-sagemaker-role'
+
+  LambdaRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: InvokeSageMakerEndpoint
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: sagemaker:InvokeEndpoint
+                Resource: '*'
+        - PolicyName: ReadECRImages
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                Resource: '*'
+      RoleName: !Sub '${ProjectName}-${EnvironmentName}-lambda-role'
+
+  APIGatewayRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
+      RoleName: !Sub '${ProjectName}-${EnvironmentName}-apigateway-role'
+
+  # ===== Storage Resources =====
+  ModelArtifactBucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName: !Sub '${ProjectName}-${EnvironmentName}-artifacts-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+
+  # ===== SageMaker Resources =====
   SageMakerModel:
     Type: 'AWS::SageMaker::Model'
+    Condition: HasModelArtifact
     Properties:
       ExecutionRoleArn: !GetAtt SageMakerRole.Arn
-      ModelName: !Sub 'my-model-${AWS::StackName}'
+      ModelName: !Sub '${ProjectName}-${EnvironmentName}-model'
       PrimaryContainer:
         Image: !Ref ContainerImage
         ModelDataUrl: !Ref ModelArtifactUrl
 
   SageMakerEndpointConfig:
     Type: 'AWS::SageMaker::EndpointConfig'
+    Condition: HasModelArtifact
     Properties:
-      EndpointConfigName: !Sub 'my-endpoint-config-${AWS::StackName}'
+      EndpointConfigName: !Sub '${ProjectName}-${EnvironmentName}-endpoint-config'
       ProductionVariants:
         - InitialInstanceCount: 1
-          InstanceType: ml.m5.large
-          ModelName: !Ref SageMakerModel
+          InstanceType: !Ref InstanceType
+          ModelName: !GetAtt SageMakerModel.ModelName
           VariantName: 'AllTraffic'
+          InitialVariantWeight: 1.0
 
   SageMakerEndpoint:
     Type: 'AWS::SageMaker::Endpoint'
+    Condition: HasModelArtifact
     Properties:
-      EndpointName: !Sub 'my-endpoint-${AWS::StackName}'
-      EndpointConfigName: !Ref SageMakerEndpointConfig
+      EndpointName: !Sub '${ProjectName}-${EnvironmentName}-endpoint'
+      EndpointConfigName: !GetAtt SageMakerEndpointConfig.EndpointConfigName
 
+  # ===== Lambda Function =====
   InferenceLambda:
     Type: 'AWS::Lambda::Function'
     Properties:
-      FunctionName: !Sub 'inference-lambda-${AWS::StackName}'
+      FunctionName: !Sub '${ProjectName}-${EnvironmentName}-inference'
+      Role: !GetAtt LambdaRole.Arn
       Runtime: python3.8
+      Handler: index.handler
+      Timeout: 30
+      MemorySize: 256
       Code:
         ZipFile: |
-          # Lambda function code to call SageMaker endpoint
+          import json
+          import boto3
+          import os
+          import base64
+          from io import BytesIO
+
+          def handler(event, context):
+              # Get the endpoint name from environment variables
+              endpoint_name = os.environ.get('SAGEMAKER_ENDPOINT_NAME', '')
+              
+              # If no endpoint exists yet, return a message
+              if not endpoint_name:
+                  return {
+                      'statusCode': 200,
+                      'headers': {'Content-Type': 'application/json'},
+                      'body': json.dumps({
+                          'message': 'Model endpoint not deployed yet. Please deploy a model first.'
+                      })
+                  }
+              
+              # Get the text prompt from the request
+              try:
+                  body = json.loads(event.get('body', '{}'))
+                  text_prompt = body.get('text', '')
+                  
+                  if not text_prompt:
+                      return {
+                          'statusCode': 400,
+                          'headers': {'Content-Type': 'application/json'},
+                          'body': json.dumps({
+                              'error': 'Text prompt is required in the request body.'
+                          })
+                      }
+                  
+                  # Call the SageMaker endpoint
+                  sagemaker_runtime = boto3.client('sagemaker-runtime')
+                  response = sagemaker_runtime.invoke_endpoint(
+                      EndpointName=endpoint_name,
+                      ContentType='application/json',
+                      Body=json.dumps({'text': text_prompt})
+                  )
+                  
+                  # Process the response (assuming the model returns a base64 encoded image)
+                  result = json.loads(response['Body'].read().decode())
+                  
+                  return {
+                      'statusCode': 200,
+                      'headers': {'Content-Type': 'application/json'},
+                      'body': json.dumps(result)
+                  }
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'headers': {'Content-Type': 'application/json'},
+                      'body': json.dumps({
+                          'error': str(e)
+                      })
+                  }
       Environment:
         Variables:
-          SAGEMAKER_ENDPOINT_NAME: !Ref SageMakerEndpoint
+          SAGEMAKER_ENDPOINT_NAME: 
+            Fn::If:
+              - HasModelArtifact
+              - !Ref SageMakerEndpoint
+              - ""
 
+  MetricsLambda:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      FunctionName: !Sub '${ProjectName}-${EnvironmentName}-metrics'
+      Role: !GetAtt LambdaRole.Arn
+      Runtime: python3.8
+      Handler: index.handler
+      Timeout: 30
+      MemorySize: 256
+      Code:
+        ZipFile: |
+          import json
+          
+          def handler(event, context):
+              # In a real implementation, you would fetch metrics from CloudWatch
+              # or another metrics store. This is a placeholder.
+              mock_metrics = {
+                  'metrics': {
+                      'fid_score': 35.7,
+                      'inception_score': 7.2,
+                      'training_loss': 1.85,
+                      'validation_loss': 2.1
+                  },
+                  'last_updated': '2023-07-10T15:30:45Z'
+              }
+              
+              return {
+                  'statusCode': 200,
+                  'headers': {'Content-Type': 'application/json'},
+                  'body': json.dumps(mock_metrics)
+              }
+
+  # ===== API Gateway =====
   APIGatewayRestAPI:
     Type: 'AWS::ApiGateway::RestApi'
     Properties:
-      Name: !Sub 'my-project-API-${AWS::StackName}'
+      Name: !Sub '${ProjectName}-${EnvironmentName}-api'
+      Description: 'API for the Text-to-Image GAN project'
 
-  APIGatewayResource:
+  InferenceResource:
     Type: 'AWS::ApiGateway::Resource'
     Properties:
       RestApiId: !Ref APIGatewayRestAPI
       ParentId: !GetAtt APIGatewayRestAPI.RootResourceId
-      PathPart: 'predict'
+      PathPart: 'generate'
 
-  APIGatewayMethod:
+  MetricsResource:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      RestApiId: !Ref APIGatewayRestAPI
+      ParentId: !GetAtt APIGatewayRestAPI.RootResourceId
+      PathPart: 'metrics'
+
+  InferenceMethod:
     Type: 'AWS::ApiGateway::Method'
     Properties:
       RestApiId: !Ref APIGatewayRestAPI
-      ResourceId: !Ref APIGatewayResource
+      ResourceId: !Ref InferenceResource
       HttpMethod: POST
       AuthorizationType: NONE
       Integration:
-        Type: LAMBDA
+        Type: AWS_PROXY
         IntegrationHttpMethod: POST
-        Uri: !Sub 'arn:aws:apigateway:$AWS::Region:lambda:path/2015-03-31/functions/${InferenceLambda.Arn}/invocations'
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${InferenceLambda.Arn}/invocations'
+
+  MetricsMethod:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      RestApiId: !Ref APIGatewayRestAPI
+      ResourceId: !Ref MetricsResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${MetricsLambda.Arn}/invocations'
+
+  InferenceLambdaPermission:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref InferenceLambda
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${APIGatewayRestAPI}/*/POST/generate'
+
+  MetricsLambdaPermission:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref MetricsLambda
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${APIGatewayRestAPI}/*/GET/metrics'
 
   APIGatewayDeployment:
     Type: 'AWS::ApiGateway::Deployment'
+    DependsOn:
+      - InferenceMethod
+      - MetricsMethod
     Properties:
       RestApiId: !Ref APIGatewayRestAPI
-      StageName: prod
+      Description: 'Initial deployment'
 
   APIGatewayStage:
     Type: 'AWS::ApiGateway::Stage'
     Properties:
       RestApiId: !Ref APIGatewayRestAPI
-      StageName: prod
+      StageName: v1
       DeploymentId: !Ref APIGatewayDeployment
+      MethodSettings:
+        - ResourcePath: '/*'
+          HttpMethod: '*'
+          MetricsEnabled: true
+          DataTraceEnabled: true
+          LoggingLevel: INFO
+
+  # ===== CloudWatch Dashboard =====
+  MonitoringDashboard:
+    Type: 'AWS::CloudWatch::Dashboard'
+    Properties:
+      DashboardName: !Sub '${ProjectName}-${EnvironmentName}-dashboard'
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/ApiGateway", "Count", "ApiName", "${ProjectName}-${EnvironmentName}-api" ]
+                ],
+                "period": 300,
+                "stat": "Sum",
+                "region": "${AWS::Region}",
+                "title": "API Gateway Request Count"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/Lambda", "Invocations", "FunctionName", "${ProjectName}-${EnvironmentName}-inference" ],
+                  [ "AWS/Lambda", "Invocations", "FunctionName", "${ProjectName}-${EnvironmentName}-metrics" ]
+                ],
+                "period": 300,
+                "stat": "Sum",
+                "region": "${AWS::Region}",
+                "title": "Lambda Invocations"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 6,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/Lambda", "Duration", "FunctionName", "${ProjectName}-${EnvironmentName}-inference" ],
+                  [ "AWS/Lambda", "Duration", "FunctionName", "${ProjectName}-${EnvironmentName}-metrics" ]
+                ],
+                "period": 300,
+                "stat": "Average",
+                "region": "${AWS::Region}",
+                "title": "Lambda Duration"
+              }
+            }
+          ]
+        }
+
+Conditions:
+  HasModelArtifact: !And [!Not [!Equals [!Ref ModelArtifactUrl, '']], !Not [!Equals [!Ref ContainerImage, '']]]
+
+Outputs:
+  SageMakerRoleArn:
+    Description: "ARN of the SageMaker execution role"
+    Value: !GetAtt SageMakerRole.Arn
+    Export:
+      Name: !Sub "${ProjectName}-${EnvironmentName}-sagemaker-role-arn"
+  
+  LambdaRoleArn:
+    Description: "ARN of the Lambda execution role"
+    Value: !GetAtt LambdaRole.Arn
+    Export:
+      Name: !Sub "${ProjectName}-${EnvironmentName}-lambda-role-arn"
+    
+  APIGatewayRoleArn:
+    Description: "ARN of the API Gateway role"
+    Value: !GetAtt APIGatewayRole.Arn
+    Export:
+      Name: !Sub "${ProjectName}-${EnvironmentName}-apigateway-role-arn"
+  
+  ModelArtifactBucketName:
+    Description: "Name of the S3 bucket for model artifacts"
+    Value: !Ref ModelArtifactBucket
+    Export:
+      Name: !Sub "${ProjectName}-${EnvironmentName}-model-artifact-bucket"
+  
+  APIEndpoint:
+    Description: "URL of the API Gateway endpoint"
+    Value: !Sub "https://${APIGatewayRestAPI}.execute-api.${AWS::Region}.amazonaws.com/v1"
+    Export:
+      Name: !Sub "${ProjectName}-${EnvironmentName}-api-endpoint"
