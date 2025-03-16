@@ -23,8 +23,6 @@ phases:
       - ECR_REPOSITORY_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${ECR_REPOSITORY_NAME}"
       - COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
       - IMAGE_TAG=${COMMIT_HASH:=latest}
-      - echo "Repository URI: $ECR_REPOSITORY_URI"
-      - echo "Image tag: $IMAGE_TAG"
       - echo "Checking if ECR repository exists..."
       - if ! aws ecr describe-repositories --repository-names ${ECR_REPOSITORY_NAME} > /dev/null 2>&1; then echo "Creating ECR repository..."; aws ecr create-repository --repository-name ${ECR_REPOSITORY_NAME}; else echo "ECR repository already exists"; fi
       - echo "Logging in to Amazon ECR..."
