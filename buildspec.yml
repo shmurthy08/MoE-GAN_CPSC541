@@ -16,7 +16,7 @@ phases:
       - ECR_REPOSITORY_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${ECR_REPOSITORY_NAME}"
       - COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
       - IMAGE_TAG=${COMMIT_HASH:=latest}
-      - echo "Full image name: $ECR_REPOSITORY_URI:$IMAGE_TAG"
+      - echo "Full image name:$ECR_REPOSITORY_URI:$IMAGE_TAG"
       # Try to create repository (or continue if it exists)
       - aws ecr create-repository --repository-name ${ECR_REPOSITORY_NAME} || echo "Repository may already exist"
       # Login to ECR
@@ -27,7 +27,7 @@ phases:
       - echo Creating minimal required files
       - mkdir -p scripts
       - echo "print('Placeholder')" > train.py
-      - echo "def model_fn(model_dir): return {}" > inference.py
+      - echo "def model_fn(model_dir):return {}" > inference.py
       - echo "print('Placeholder')" > scripts/start_training_job.py
       - echo "boto3>=1.20.0" > requirements.txt
       - echo Building Docker image
@@ -39,8 +39,8 @@ phases:
       - echo Pushing to ECR
       - docker push $ECR_REPOSITORY_URI:$IMAGE_TAG
       - docker push $ECR_REPOSITORY_URI:latest
-      - echo "Image successfully pushed to: $ECR_REPOSITORY_URI:$IMAGE_TAG"
-      - echo "{\"ECRImageURI\": \"${ECR_REPOSITORY_URI}:${IMAGE_TAG}\"}" > build_output.json
+      - echo "Image successfully pushed to:$ECR_REPOSITORY_URI:$IMAGE_TAG"
+      - echo "{\"ECRImageURI\":\"${ECR_REPOSITORY_URI}:${IMAGE_TAG}\"}" > build_output.json
 
 artifacts:
   files:
