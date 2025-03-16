@@ -33,6 +33,33 @@ phases:
         fi
       - echo Logging in to Amazon ECR...
       - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin ${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com
+      # Add this section to check commit message for training flags
+      - |
+        SHOULD_TRAIN=0
+        # Default behavior: don't train
+        if [ -n "$CODEBUILD_WEBHOOK_HEAD_REF" ]; then
+          echo "Checking commit message for training flags..."
+          git clone https://github.com/$CODEBUILD_SOURCE_REPO_URL.git repo
+          cd repo
+          git checkout $CODEBUILD_RESOLVED_SOURCE_VERSION
+          COMMIT_MSG=$(git log -1 --pretty=%B)
+          echo "Commit message: $COMMIT_MSG"
+          
+          # If commit message contains [train], set SHOULD_TRAIN=1
+          if [[ "$COMMIT_MSG" == *"[train]"* ]]; then
+            echo "Found [train] flag in commit message. Will start training job."
+            SHOULD_TRAIN=1
+          fi
+          
+          # If commit message contains [skip-train], set SHOULD_TRAIN=0
+          if [[ "$COMMIT_MSG" == *"[skip-train]"* ]]; then
+            echo "Found [skip-train] flag in commit message. Will skip training job."
+            SHOULD_TRAIN=0
+          fi
+          
+          cd ..
+        fi
+        echo "SHOULD_TRAIN=$SHOULD_TRAIN"
       
   build:
     commands:
@@ -66,6 +93,30 @@ phases:
       - echo Pushing the Docker image...
       - docker push ${ECR_REPOSITORY_URI}:${IMAGE_TAG}
       - docker push ${ECR_REPOSITORY_URI}:latest
+      # Add this section to start training job if needed
+      - |
+        if [ "$SHOULD_TRAIN" == "1" ]; then
+          echo "Starting SageMaker training job..."
+          
+          # Get SageMaker role ARN from stack outputs
+          SAGEMAKER_ROLE_ARN=$(aws cloudformation describe-stacks --stack-name ${CLOUDFORMATION_STACK_NAME} --query "Stacks[0].Outputs[?OutputKey=='SageMakerRoleArn'].OutputValue" --output text)
+          
+          # Get model artifact bucket name from stack outputs
+          MODEL_BUCKET=$(aws cloudformation describe-stacks --stack-name ${CLOUDFORMATION_STACK_NAME} --query "Stacks[0].Outputs[?OutputKey=='ModelArtifactBucketName'].OutputValue" --output text)
+          
+          # Execute the training job script
+          python scripts/start_training_job.py \
+            --job-name "train-${COMMIT_HASH}" \
+            --role-arn ${SAGEMAKER_ROLE_ARN} \
+            --image-uri ${ECR_REPOSITORY_URI}:${IMAGE_TAG} \
+            --bucket ${MODEL_BUCKET} \
+            --prefix "models/${COMMIT_HASH}" \
+            --instance-type ml.t2.medium
+          
+          echo "Training job submitted successfully"
+        else
+          echo "Skipping training job based on commit message flags"
+        fi
       - |
         echo Creating build output file with ECR image URI...
         cat > build_output.json << EOF
