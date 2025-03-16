@@ -21,9 +21,11 @@ Parameters:
     Description: Name of the API Gateway REST API.
   ModelImageUri:
     Type: String
+    Default: "111222333444.dkr.ecr.us-east-1.amazonaws.com my-text-to-image:latest"
     Description: "ECR URI for the Docker container with inference code (update later)."
   ModelDataUrl:
     Type: String
+    Default: ""
     Description: "S3 URL for model artifacts (if applicable)."
 
 Resources:
