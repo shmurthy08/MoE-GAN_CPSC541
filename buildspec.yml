@@ -1,220 +1,48 @@
 version: 0.2
 
-env:
-  variables:
-    PROJECT_NAME: gan-text-to-image
-    ENVIRONMENT_NAME: dev
-
 phases:
   install:
     runtime-versions:
       python: 3.8
     commands:
-      - echo Installing dependencies...
-      - pip install --upgrade pip
-      - pip install boto3 sagemaker awscli
+      - echo Installing minimal dependencies
+      - pip install awscli
   
   pre_build:
     commands:
-      - echo Setting up variables...
+      - echo Setting up ECR variables
       - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-      - ECR_REPOSITORY_NAME="${PROJECT_NAME}-${ENVIRONMENT_NAME}-repository"
-      - CLOUDFORMATION_STACK_NAME="${PROJECT_NAME}-${ENVIRONMENT_NAME}-stack"
+      - ECR_REPOSITORY_NAME="gan-text-to-image-dev-repository"
       - ECR_REPOSITORY_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${ECR_REPOSITORY_NAME}"
       - COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
       - IMAGE_TAG=${COMMIT_HASH:=latest}
-      - echo "Checking if ECR repository exists..."
-      - if ! aws ecr describe-repositories --repository-names ${ECR_REPOSITORY_NAME} > /dev/null 2>&1; then echo "Creating ECR repository..."; aws ecr create-repository --repository-name ${ECR_REPOSITORY_NAME}; else echo "ECR repository already exists"; fi
-      - echo "Logging in to Amazon ECR..."
+      - echo "Full image name: $ECR_REPOSITORY_URI:$IMAGE_TAG"
+      # Try to create repository (or continue if it exists)
+      - aws ecr create-repository --repository-name ${ECR_REPOSITORY_NAME} || echo "Repository may already exist"
+      # Login to ECR
       - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin ${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com
-      - echo "Checking if CloudFormation stack exists..."
-      - if ! aws cloudformation describe-stacks --stack-name ${CLOUDFORMATION_STACK_NAME} > /dev/null 2>&1; then STACK_EXISTS=0; echo "Stack does not exist. Will create it."; else STACK_EXISTS=1; echo "Stack already exists."; fi
-      - SHOULD_TRAIN=0
-      - COMMIT_MSG=$(git log -1 --pretty=%B 2>/dev/null || echo "")
-      - echo "Commit message: $COMMIT_MSG"
-      - if [[ "$COMMIT_MSG" == *"[train]"* ]]; then echo "Found [train] flag in commit message"; SHOULD_TRAIN=1; fi
-      - if [[ "$COMMIT_MSG" == *"[skip-train]"* ]]; then echo "Found [skip-train] flag in commit message"; SHOULD_TRAIN=0; fi
-      - echo "SHOULD_TRAIN=$SHOULD_TRAIN"
       
   build:
     commands:
-      - echo Build started on `date`
+      - echo Creating minimal required files
       - mkdir -p scripts
-      - echo "Creating placeholder files if they don't exist"
-      - |
-        if [ ! -f train.py ]; then
-          echo "Creating train.py"
-          cat > train.py << 'EOL'
-          #!/usr/bin/env python
-          import os, sys, json, logging
-          logging.basicConfig(level=logging.INFO)
-          logger = logging.getLogger(__name__)
-          prefix = '/opt/ml/'
-          model_path = os.path.join(prefix, 'model')
-          
-          def train():
-              logger.info("Starting training job")
-              os.makedirs(model_path, exist_ok=True)
-              logger.info("Training model (placeholder)...")
-              with open(os.path.join(model_path, 'model.json'), 'w') as f:
-                  json.dump({"model_type": "GAN", "version": "0.1"}, f)
-              logger.info(f"Model saved to: {model_path}")
-              return True
-          
-          if __name__ == '__main__':
-              try:
-                  train()
-                  sys.exit(0)
-              except Exception as e:
-                  logger.error(f"Training failed: {e}")
-                  sys.exit(1)
-          EOL
-          chmod +x train.py
-        fi
-      - |
-        if [ ! -f inference.py ]; then
-          echo "Creating inference.py"
-          cat > inference.py << 'EOL'
-          import os, json, logging
-          logging.basicConfig(level=logging.INFO)
-          logger = logging.getLogger(__name__)
-          
-          def model_fn(model_dir):
-              logger.info(f"Loading model from: {model_dir}")
-              return {"description": "Placeholder model"}
-          
-          def input_fn(request_body, request_content_type):
-              return {'text': json.loads(request_body).get('text', '')}
-          
-          def predict_fn(input_data, model):
-              text_prompt = input_data.get('text', '')
-              return {'text_prompt': text_prompt, 'message': f"Generated image for: '{text_prompt}' (placeholder)"}
-          
-          def output_fn(prediction, response_content_type):
-              return json.dumps(prediction)
-          EOL
-        fi
-      - |
-        if [ ! -f scripts/start_training_job.py ]; then
-          echo "Creating start_training_job.py"
-          cat > scripts/start_training_job.py << 'EOL'
-          #!/usr/bin/env python3
-          import boto3, argparse
-          
-          def main():
-              parser = argparse.ArgumentParser(description='Start a SageMaker training job')
-              parser.add_argument('--job-name', required=True)
-              parser.add_argument('--role-arn', required=True)
-              parser.add_argument('--image-uri', required=True)
-              parser.add_argument('--bucket', required=True)
-              parser.add_argument('--prefix', required=True)
-              parser.add_argument('--instance-type', default='ml.t2.medium')
-              args = parser.parse_args()
-              
-              sagemaker = boto3.client('sagemaker')
-              print(f"Starting training job: {args.job_name}")
-              
-              response = sagemaker.create_training_job(
-                  TrainingJobName=args.job_name,
-                  AlgorithmSpecification={
-                      'TrainingImage': args.image_uri,
-                      'TrainingInputMode': 'File'
-                  },
-                  RoleArn=args.role_arn,
-                  OutputDataConfig={
-                      'S3OutputPath': f's3://{args.bucket}/{args.prefix}'
-                  },
-                  ResourceConfig={
-                      'InstanceType': args.instance_type,
-                      'InstanceCount': 1,
-                      'VolumeSizeInGB': 10
-                  },
-                  StoppingCondition={
-                      'MaxRuntimeInSeconds': 3600
-                  },
-                  HyperParameters={
-                      "epochs": "10",
-                      "batch_size": "32",
-                      "learning_rate": "0.0002"
-                  }
-              )
-              
-              print(f"Training job started: {response['TrainingJobArn']}")
-              return response
-          
-          if __name__ == '__main__':
-              main()
-          EOL
-          chmod +x scripts/start_training_job.py
-        fi
-      - echo "Building Docker image with tag: $ECR_REPOSITORY_URI:$IMAGE_TAG"
-      - docker build --no-cache -t $ECR_REPOSITORY_URI:$IMAGE_TAG .
+      - echo "print('Placeholder')" > train.py
+      - echo "def model_fn(model_dir): return {}" > inference.py
+      - echo "print('Placeholder')" > scripts/start_training_job.py
+      - echo "boto3>=1.20.0" > requirements.txt
+      - echo Building Docker image
+      - docker build -t $ECR_REPOSITORY_URI:$IMAGE_TAG .
       - docker tag $ECR_REPOSITORY_URI:$IMAGE_TAG $ECR_REPOSITORY_URI:latest
-      - |
-        if [ "$STACK_EXISTS" = "0" ]; then
-          echo "Creating CloudFormation stack..."
-          aws cloudformation create-stack \
-            --stack-name ${CLOUDFORMATION_STACK_NAME} \
-            --template-body file://cloudformation.yaml \
-            --parameters ParameterKey=ProjectName,ParameterValue=${PROJECT_NAME} \
-                         ParameterKey=EnvironmentName,ParameterValue=${ENVIRONMENT_NAME} \
-                         ParameterKey=ContainerImage,ParameterValue="" \
-                         ParameterKey=ModelArtifactUrl,ParameterValue="" \
-                         ParameterKey=InstanceType,ParameterValue="ml.t2.medium" \
-            --capabilities CAPABILITY_NAMED_IAM
-          
-          echo "Waiting for stack creation to complete..."
-          aws cloudformation wait stack-create-complete --stack-name ${CLOUDFORMATION_STACK_NAME}
-        else
-          echo "CloudFormation stack already exists"
-        fi
   
   post_build:
     commands:
-      - echo Build completed on `date`
-      - echo "Pushing Docker image to ECR..."
+      - echo Pushing to ECR
       - docker push $ECR_REPOSITORY_URI:$IMAGE_TAG
       - docker push $ECR_REPOSITORY_URI:latest
-      - |
-        if [ "$SHOULD_TRAIN" = "1" ]; then
-          echo "Starting SageMaker training job..."
-          
-          # Get SageMaker role ARN and model bucket
-          SAGEMAKER_ROLE_ARN=$(aws cloudformation describe-stacks --stack-name ${CLOUDFORMATION_STACK_NAME} --query "Stacks[0].Outputs[?OutputKey=='SageMakerRoleArn'].OutputValue" --output text)
-          MODEL_BUCKET=$(aws cloudformation describe-stacks --stack-name ${CLOUDFORMATION_STACK_NAME} --query "Stacks[0].Outputs[?OutputKey=='ModelArtifactBucketName'].OutputValue" --output text)
-          
-          # Run training job
-          python scripts/start_training_job.py \
-            --job-name "train-${COMMIT_HASH}" \
-            --role-arn ${SAGEMAKER_ROLE_ARN} \
-            --image-uri ${ECR_REPOSITORY_URI}:${IMAGE_TAG} \
-            --bucket ${MODEL_BUCKET} \
-            --prefix "models/${COMMIT_HASH}" \
-            --instance-type ml.t2.medium
-          
-          echo "Training job submitted successfully"
-        else
-          echo "Skipping training job based on commit message flags"
-        fi
-      - |
-        echo "Creating build output file..."
-        cat > build_output.json << EOF
-        {
-          "ECRImageURI": "${ECR_REPOSITORY_URI}:${IMAGE_TAG}"
-        }
-        EOF
+      - echo "Image successfully pushed to: $ECR_REPOSITORY_URI:$IMAGE_TAG"
+      - echo "{\"ECRImageURI\": \"${ECR_REPOSITORY_URI}:${IMAGE_TAG}\"}" > build_output.json
 
 artifacts:
   files:
-    - cloudformation.yaml
     - build_output.json
-    - scripts/**/*
-    - train.py
-    - inference.py
-    - requirements.txt
-    - Dockerfile
   discard-paths: no
-
-cache:
-  paths:
-    - '/root/.cache/pip/**/*'
