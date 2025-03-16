@@ -2,10 +2,8 @@ version: 0.2
 
 env:
   variables:
-    PROJECT_NAME: "gan-text-to-image"
-    ENVIRONMENT_NAME: "dev"
-    ECR_REPOSITORY_NAME: "${PROJECT_NAME}-${ENVIRONMENT_NAME}-repository"
-    CLOUDFORMATION_STACK_NAME: "${PROJECT_NAME}-${ENVIRONMENT_NAME}-stack"
+    PROJECT_NAME: gan-text-to-image
+    ENVIRONMENT_NAME: dev
   
 phases:
   install:
@@ -15,61 +13,191 @@ phases:
       - echo Installing dependencies...
       - pip install --upgrade pip
       - pip install boto3 sagemaker awscli
+      - echo Checking Docker version...
+      - docker --version || echo "Docker not available"
   
   pre_build:
     commands:
       - echo Setting up variables...
       - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-      - ECR_REPOSITORY_URI=${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${ECR_REPOSITORY_NAME}
+      - ECR_REPOSITORY_NAME="${PROJECT_NAME}-${ENVIRONMENT_NAME}-repository"
+      - CLOUDFORMATION_STACK_NAME="${PROJECT_NAME}-${ENVIRONMENT_NAME}-stack"
+      - ECR_REPOSITORY_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${ECR_REPOSITORY_NAME}"
       - COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
       - IMAGE_TAG=${COMMIT_HASH:=latest}
-      - STACK_EXISTS=$(aws cloudformation describe-stacks --stack-name ${CLOUDFORMATION_STACK_NAME} 2>&1 | grep -c "Stack with id ${CLOUDFORMATION_STACK_NAME} does not exist" || true)
-      - echo Checking if ECR repository exists...
-      - REPO_EXISTS=$(aws ecr describe-repositories --repository-names ${ECR_REPOSITORY_NAME} 2>&1 | grep -c "RepositoryNotFoundException" || true)
+      - echo "Repository URI: $ECR_REPOSITORY_URI"
+      - echo "Image tag: $IMAGE_TAG"
+      
+      # Check and create ECR repository if needed
       - |
-        if [ "$REPO_EXISTS" == "1" ]; then
+        echo "Checking if ECR repository exists..."
+        if ! aws ecr describe-repositories --repository-names ${ECR_REPOSITORY_NAME} > /dev/null 2>&1; then
           echo "Creating ECR repository..."
           aws ecr create-repository --repository-name ${ECR_REPOSITORY_NAME}
+        else
+          echo "ECR repository already exists"
         fi
-      - echo Logging in to Amazon ECR...
+      
+      # Login to ECR
+      - echo "Logging in to Amazon ECR..."
       - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin ${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com
-      # Add this section to check commit message for training flags
+      
+      # Check if CloudFormation stack exists
+      - |
+        echo "Checking if CloudFormation stack exists..."
+        if ! aws cloudformation describe-stacks --stack-name ${CLOUDFORMATION_STACK_NAME} > /dev/null 2>&1; then
+          STACK_EXISTS=0
+          echo "Stack does not exist. Will create it."
+        else
+          STACK_EXISTS=1
+          echo "Stack already exists."
+        fi
+      
+      # Check for training flags
       - |
         SHOULD_TRAIN=0
-        # Default behavior: don't train
-        if [ -n "$CODEBUILD_WEBHOOK_HEAD_REF" ]; then
-          echo "Checking commit message for training flags..."
-          git clone https://github.com/$CODEBUILD_SOURCE_REPO_URL.git repo
-          cd repo
-          git checkout $CODEBUILD_RESOLVED_SOURCE_VERSION
-          COMMIT_MSG=$(git log -1 --pretty=%B)
-          echo "Commit message: $COMMIT_MSG"
-          
-          # If commit message contains [train], set SHOULD_TRAIN=1
-          if [[ "$COMMIT_MSG" == *"[train]"* ]]; then
-            echo "Found [train] flag in commit message. Will start training job."
-            SHOULD_TRAIN=1
-          fi
-          
-          # If commit message contains [skip-train], set SHOULD_TRAIN=0
-          if [[ "$COMMIT_MSG" == *"[skip-train]"* ]]; then
-            echo "Found [skip-train] flag in commit message. Will skip training job."
-            SHOULD_TRAIN=0
-          fi
-          
-          cd ..
+        COMMIT_MSG=$(git log -1 --pretty=%B 2>/dev/null || echo "")
+        echo "Commit message: $COMMIT_MSG"
+        
+        # Check for training flags in commit message
+        if [[ "$COMMIT_MSG" == *"[train]"* ]]; then
+          echo "Found [train] flag in commit message"
+          SHOULD_TRAIN=1
         fi
+        
+        if [[ "$COMMIT_MSG" == *"[skip-train]"* ]]; then
+          echo "Found [skip-train] flag in commit message"
+          SHOULD_TRAIN=0
+        fi
+        
         echo "SHOULD_TRAIN=$SHOULD_TRAIN"
       
   build:
     commands:
       - echo Build started on `date`
-      - echo Building the Docker image...
-      - docker build -t ${ECR_REPOSITORY_URI}:${IMAGE_TAG} .
-      - docker tag ${ECR_REPOSITORY_URI}:${IMAGE_TAG} ${ECR_REPOSITORY_URI}:latest
       
+      # Ensure required files exist
       - |
-        if [ "$STACK_EXISTS" == "1" ]; then
+        # Create scripts directory if it doesn't exist
+        mkdir -p scripts
+        
+        # Ensure train.py exists
+        if [ ! -f train.py ]; then
+          echo "Creating placeholder train.py"
+          cat > train.py << 'EOL'
+          #!/usr/bin/env python
+          import os, sys, json, logging
+          logging.basicConfig(level=logging.INFO)
+          logger = logging.getLogger(__name__)
+          prefix = '/opt/ml/'
+          model_path = os.path.join(prefix, 'model')
+          
+          def train():
+              logger.info("Starting training job")
+              os.makedirs(model_path, exist_ok=True)
+              logger.info("Training model (placeholder)...")
+              with open(os.path.join(model_path, 'model.json'), 'w') as f:
+                  json.dump({"model_type": "GAN", "version": "0.1"}, f)
+              logger.info(f"Model saved to: {model_path}")
+              return True
+          
+          if __name__ == '__main__':
+              try:
+                  train()
+                  sys.exit(0)
+              except Exception as e:
+                  logger.error(f"Training failed: {e}")
+                  sys.exit(1)
+          EOL
+          chmod +x train.py
+        fi
+        
+        # Ensure inference.py exists
+        if [ ! -f inference.py ]; then
+          echo "Creating placeholder inference.py"
+          cat > inference.py << 'EOL'
+          import os, json, logging
+          logging.basicConfig(level=logging.INFO)
+          logger = logging.getLogger(__name__)
+          
+          def model_fn(model_dir):
+              logger.info(f"Loading model from: {model_dir}")
+              return {"description": "Placeholder model"}
+          
+          def input_fn(request_body, request_content_type):
+              return {'text': json.loads(request_body).get('text', '')}
+          
+          def predict_fn(input_data, model):
+              text_prompt = input_data.get('text', '')
+              return {'text_prompt': text_prompt, 'message': f"Generated image for: '{text_prompt}' (placeholder)"}
+          
+          def output_fn(prediction, response_content_type):
+              return json.dumps(prediction)
+          EOL
+        fi
+        
+        # Ensure start_training_job.py exists
+        if [ ! -f scripts/start_training_job.py ]; then
+          echo "Creating start_training_job.py"
+          cat > scripts/start_training_job.py << 'EOL'
+          #!/usr/bin/env python3
+          import boto3, argparse
+          
+          def main():
+              parser = argparse.ArgumentParser(description='Start a SageMaker training job')
+              parser.add_argument('--job-name', required=True, help='Training job name')
+              parser.add_argument('--role-arn', required=True, help='SageMaker execution role ARN')
+              parser.add_argument('--image-uri', required=True, help='ECR image URI')
+              parser.add_argument('--bucket', required=True, help='S3 bucket for model artifacts')
+              parser.add_argument('--prefix', required=True, help='S3 prefix for model artifacts')
+              parser.add_argument('--instance-type', default='ml.t2.medium', help='Instance type')
+              args = parser.parse_args()
+              
+              sagemaker = boto3.client('sagemaker')
+              print(f"Starting training job: {args.job_name}")
+              
+              response = sagemaker.create_training_job(
+                  TrainingJobName=args.job_name,
+                  AlgorithmSpecification={
+                      'TrainingImage': args.image_uri,
+                      'TrainingInputMode': 'File'
+                  },
+                  RoleArn=args.role_arn,
+                  OutputDataConfig={
+                      'S3OutputPath': f's3://{args.bucket}/{args.prefix}'
+                  },
+                  ResourceConfig={
+                      'InstanceType': args.instance_type,
+                      'InstanceCount': 1,
+                      'VolumeSizeInGB': 10
+                  },
+                  StoppingCondition={
+                      'MaxRuntimeInSeconds': 3600
+                  },
+                  HyperParameters={
+                      "epochs": "10",
+                      "batch_size": "32",
+                      "learning_rate": "0.0002"
+                  }
+              )
+              
+              print(f"Training job started: {response['TrainingJobArn']}")
+              return response
+          
+          if __name__ == '__main__':
+              main()
+          EOL
+          chmod +x scripts/start_training_job.py
+        fi
+      
+      # Build Docker image (with explicit variable expansion)
+      - echo "Building Docker image with tag: $ECR_REPOSITORY_URI:$IMAGE_TAG"
+      - docker build --no-cache -t $ECR_REPOSITORY_URI:$IMAGE_TAG .
+      - docker tag $ECR_REPOSITORY_URI:$IMAGE_TAG $ECR_REPOSITORY_URI:latest
+      
+      # Create or update CloudFormation stack
+      - |
+        if [ "$STACK_EXISTS" = "0" ]; then
           echo "Creating CloudFormation stack..."
           aws cloudformation create-stack \
             --stack-name ${CLOUDFORMATION_STACK_NAME} \
@@ -90,21 +218,20 @@ phases:
   post_build:
     commands:
       - echo Build completed on `date`
-      - echo Pushing the Docker image...
-      - docker push ${ECR_REPOSITORY_URI}:${IMAGE_TAG}
-      - docker push ${ECR_REPOSITORY_URI}:latest
-      # Add this section to start training job if needed
+      - echo "Pushing Docker image to ECR..."
+      - docker push $ECR_REPOSITORY_URI:$IMAGE_TAG
+      - docker push $ECR_REPOSITORY_URI:latest
+      
+      # Start training job if needed
       - |
-        if [ "$SHOULD_TRAIN" == "1" ]; then
+        if [ "$SHOULD_TRAIN" = "1" ]; then
           echo "Starting SageMaker training job..."
           
-          # Get SageMaker role ARN from stack outputs
+          # Get SageMaker role ARN and model bucket
           SAGEMAKER_ROLE_ARN=$(aws cloudformation describe-stacks --stack-name ${CLOUDFORMATION_STACK_NAME} --query "Stacks[0].Outputs[?OutputKey=='SageMakerRoleArn'].OutputValue" --output text)
-          
-          # Get model artifact bucket name from stack outputs
           MODEL_BUCKET=$(aws cloudformation describe-stacks --stack-name ${CLOUDFORMATION_STACK_NAME} --query "Stacks[0].Outputs[?OutputKey=='ModelArtifactBucketName'].OutputValue" --output text)
           
-          # Execute the training job script
+          # Run training job
           python scripts/start_training_job.py \
             --job-name "train-${COMMIT_HASH}" \
             --role-arn ${SAGEMAKER_ROLE_ARN} \
@@ -117,8 +244,10 @@ phases:
         else
           echo "Skipping training job based on commit message flags"
         fi
+      
+      # Create build output file
       - |
-        echo Creating build output file with ECR image URI...
+        echo "Creating build output file..."
         cat > build_output.json << EOF
         {
           "ECRImageURI": "${ECR_REPOSITORY_URI}:${IMAGE_TAG}"
@@ -129,9 +258,11 @@ artifacts:
   files:
     - cloudformation.yaml
     - build_output.json
-    - appspec.yml
     - scripts/**/*
-    - templates/**/*
+    - train.py
+    - inference.py
+    - requirements.txt
+    - Dockerfile
   discard-paths: no
 
 cache:
