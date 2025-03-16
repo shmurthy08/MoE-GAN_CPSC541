@@ -1,0 +1,23 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      python: 3.8
+  
+  build:
+    commands:
+      - echo "Building the project"
+      - pip install -r requirements.txt
+      - pytest -xvs tests/
+  
+  post_build:
+    commands:
+      - echo "Build completed"
+
+artifacts:
+  files:
+    - requirements.txt
+    - src/**/*
+    - models/**/*
+  discard-paths: no

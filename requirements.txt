@@ -1,0 +1,10 @@
+# AWS Integration
+boto3>=1.20.0
+sagemaker>=2.80.0
+
+# Utilities & Evaluation
+pillow>=8.4.0
+tensorboard>=2.8.0
+matplotlib>=3.5.0
+tqdm>=4.62.0
+pytorch-fid>=0.2.0
