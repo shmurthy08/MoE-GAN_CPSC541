@@ -1,0 +1,149 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  CloudFormation template for deploying the text-to-image synthesis model and API Gateway.
+
+Parameters:
+  SageMakerModelName:
+    Type: String
+    Default: "TextToImageModel"
+    Description: Name of the SageMaker model.
+  SageMakerEndpointConfigName:
+    Type: String
+    Default: "TextToImageEndpointConfig"
+    Description: Name of the SageMaker endpoint configuration.
+  SageMakerEndpointName:
+    Type: String
+    Default: "TextToImageEndpoint"
+    Description: Name of the SageMaker endpoint.
+  ApiName:
+    Type: String
+    Default: "TextToImageAPI"
+    Description: Name of the API Gateway REST API.
+  ModelImageUri:
+    Type: String
+    Description: "ECR URI for the Docker container with inference code (update later)."
+  ModelDataUrl:
+    Type: String
+    Description: "S3 URL for model artifacts (if applicable)."
+
+Resources:
+  SageMakerExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: SageMakerExecutionRoleForTextToImage
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: sagemaker.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+        - arn:aws:iam::aws:policy/AmazonSageMakerFullAccess
+
+  SageMakerModel:
+    Type: AWS::SageMaker::Model
+    Properties:
+      ModelName: !Ref SageMakerModelName
+      ExecutionRoleArn: !GetAtt SageMakerExecutionRole.Arn
+      PrimaryContainer:
+        Image: !Ref ModelImageUri
+        ModelDataUrl: !Ref ModelDataUrl
+
+  SageMakerEndpointConfig:
+    Type: AWS::SageMaker::EndpointConfig
+    Properties:
+      EndpointConfigName: !Ref SageMakerEndpointConfigName
+      ProductionVariants:
+        - VariantName: AllTraffic
+          ModelName: !Ref SageMakerModel
+          InitialInstanceCount: 1
+          InstanceType: ml.m5.xlarge
+          InitialVariantWeight: 1.0
+
+  SageMakerEndpoint:
+    Type: AWS::SageMaker::Endpoint
+    Properties:
+      EndpointName: !Ref SageMakerEndpointName
+      EndpointConfigName: !Ref SageMakerEndpointConfig
+
+  ApiGatewayInvokeSageMakerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeSageMakerPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sagemaker:InvokeEndpoint
+                Resource: !GetAtt SageMakerEndpoint.Arn
+
+  TextToImageApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Ref ApiName
+      Description: API Gateway for text-to-image synthesis and metrics.
+
+  InferenceResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !GetAtt TextToImageApi.RootResourceId
+      PathPart: inference
+      RestApiId: !Ref TextToImageApi
+
+  MetricsResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !GetAtt TextToImageApi.RootResourceId
+      PathPart: metrics
+      RestApiId: !Ref TextToImageApi
+
+  InferenceMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref TextToImageApi
+      ResourceId: !Ref InferenceResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:sagemaker:action/InvokeEndpoint"
+        Credentials: !GetAtt ApiGatewayInvokeSageMakerRole.Arn
+        PassthroughBehavior: WHEN_NO_MATCH
+
+  MetricsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref TextToImageApi
+      ResourceId: !Ref MetricsResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: "<YourLambdaFunctionArn>"  # Replace with actual Lambda ARN later
+        PassthroughBehavior: WHEN_NO_MATCH
+
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: [InferenceMethod, MetricsMethod]
+    Properties:
+      RestApiId: !Ref TextToImageApi
+      StageName: prod
+
+Outputs:
+  ApiEndpoint:
+    Description: "URL of the deployed API Gateway endpoint"
+    Value: !Sub "https://${TextToImageApi}.execute-api.${AWS::Region}.amazonaws.com/prod"

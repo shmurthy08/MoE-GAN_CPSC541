@@ -1,23 +1,21 @@
 version: 0.2
-
 phases:
   install:
-    runtime-versions:
-      python: 3.8
-  
+    commands:
+      - echo "Installing dependencies..."
+      # Add any pre-build commands here
+  pre_build:
+    commands:
+      - echo "Preparing build environment..."
   build:
     commands:
-      - echo "Building the project"
-      - pip install -r requirements.txt
-      - pytest -xvs tests/
-  
+      - echo "Building the Docker image..."
+      - docker build -t my-text-to-image .
+      # Optionally tag the image with a unique tag (e.g., commit ID)
   post_build:
     commands:
-      - echo "Build completed"
-
+      - echo "Build completed."
+      # Output variables or perform additional steps if needed
 artifacts:
   files:
-    - requirements.txt
-    - src/**/*
-    - models/**/*
-  discard-paths: no
+    - '**/*'
