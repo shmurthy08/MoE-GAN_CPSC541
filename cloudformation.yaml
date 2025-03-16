@@ -121,7 +121,7 @@ Resources:
       Integration:
         Type: AWS_PROXY
         IntegrationHttpMethod: POST
-        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:sagemaker:action/InvokeEndpoint"
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:sagemaker:path/endpoints/${SageMakerEndpointName}/invocations"
         Credentials: !GetAtt ApiGatewayInvokeSageMakerRole.Arn
         PassthroughBehavior: WHEN_NO_MATCH
 
@@ -133,11 +133,15 @@ Resources:
       HttpMethod: GET
       AuthorizationType: NONE
       Integration:
-        Type: AWS_PROXY
-        IntegrationHttpMethod: POST
-        Uri: "<YourLambdaFunctionArn>"  # Replace with actual Lambda ARN later
-        PassthroughBehavior: WHEN_NO_MATCH
-
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseTemplates:
+              application/json: |
+                {
+                  "status": "ok",
+                  "message": "Metrics are not available yet."
+                }
   ApiDeployment:
     Type: AWS::ApiGateway::Deployment
     DependsOn: [InferenceMethod, MetricsMethod]
