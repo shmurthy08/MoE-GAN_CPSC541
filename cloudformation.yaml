@@ -119,11 +119,23 @@ Resources:
       HttpMethod: POST
       AuthorizationType: NONE
       Integration:
-        Type: AWS_PROXY
+        Type: AWS
         IntegrationHttpMethod: POST
         Uri: !Sub "arn:aws:apigateway:${AWS::Region}:sagemaker:path/endpoints/${SageMakerEndpointName}/invocations"
         Credentials: !GetAtt ApiGatewayInvokeSageMakerRole.Arn
         PassthroughBehavior: WHEN_NO_MATCH
+        RequestTemplates:
+          application/json: |
+            {
+              "instances": $input.json('$.instances')
+            }
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseTemplates:
+              application/json: $input.json('$')
+      MethodResponses:
+        - StatusCode: 200
+
 
   MetricsMethod:
     Type: AWS::ApiGateway::Method
