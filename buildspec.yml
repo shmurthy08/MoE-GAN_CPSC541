@@ -4,7 +4,7 @@ env:
   variables:
     PROJECT_NAME: gan-text-to-image
     ENVIRONMENT_NAME: dev
-  
+
 phases:
   install:
     runtime-versions:
@@ -13,8 +13,6 @@ phases:
       - echo Installing dependencies...
       - pip install --upgrade pip
       - pip install boto3 sagemaker awscli
-      - echo Checking Docker version...
-      - docker --version || echo "Docker not available"
   
   pre_build:
     commands:
@@ -27,63 +25,27 @@ phases:
       - IMAGE_TAG=${COMMIT_HASH:=latest}
       - echo "Repository URI: $ECR_REPOSITORY_URI"
       - echo "Image tag: $IMAGE_TAG"
-      
-      # Check and create ECR repository if needed
-      - |
-        echo "Checking if ECR repository exists..."
-        if ! aws ecr describe-repositories --repository-names ${ECR_REPOSITORY_NAME} > /dev/null 2>&1; then
-          echo "Creating ECR repository..."
-          aws ecr create-repository --repository-name ${ECR_REPOSITORY_NAME}
-        else
-          echo "ECR repository already exists"
-        fi
-      
-      # Login to ECR
+      - echo "Checking if ECR repository exists..."
+      - if ! aws ecr describe-repositories --repository-names ${ECR_REPOSITORY_NAME} > /dev/null 2>&1; then echo "Creating ECR repository..."; aws ecr create-repository --repository-name ${ECR_REPOSITORY_NAME}; else echo "ECR repository already exists"; fi
       - echo "Logging in to Amazon ECR..."
       - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin ${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com
-      
-      # Check if CloudFormation stack exists
-      - |
-        echo "Checking if CloudFormation stack exists..."
-        if ! aws cloudformation describe-stacks --stack-name ${CLOUDFORMATION_STACK_NAME} > /dev/null 2>&1; then
-          STACK_EXISTS=0
-          echo "Stack does not exist. Will create it."
-        else
-          STACK_EXISTS=1
-          echo "Stack already exists."
-        fi
-      
-      # Check for training flags
-      - |
-        SHOULD_TRAIN=0
-        COMMIT_MSG=$(git log -1 --pretty=%B 2>/dev/null || echo "")
-        echo "Commit message: $COMMIT_MSG"
-        
-        # Check for training flags in commit message
-        if [[ "$COMMIT_MSG" == *"[train]"* ]]; then
-          echo "Found [train] flag in commit message"
-          SHOULD_TRAIN=1
-        fi
-        
-        if [[ "$COMMIT_MSG" == *"[skip-train]"* ]]; then
-          echo "Found [skip-train] flag in commit message"
-          SHOULD_TRAIN=0
-        fi
-        
-        echo "SHOULD_TRAIN=$SHOULD_TRAIN"
+      - echo "Checking if CloudFormation stack exists..."
+      - if ! aws cloudformation describe-stacks --stack-name ${CLOUDFORMATION_STACK_NAME} > /dev/null 2>&1; then STACK_EXISTS=0; echo "Stack does not exist. Will create it."; else STACK_EXISTS=1; echo "Stack already exists."; fi
+      - SHOULD_TRAIN=0
+      - COMMIT_MSG=$(git log -1 --pretty=%B 2>/dev/null || echo "")
+      - echo "Commit message: $COMMIT_MSG"
+      - if [[ "$COMMIT_MSG" == *"[train]"* ]]; then echo "Found [train] flag in commit message"; SHOULD_TRAIN=1; fi
+      - if [[ "$COMMIT_MSG" == *"[skip-train]"* ]]; then echo "Found [skip-train] flag in commit message"; SHOULD_TRAIN=0; fi
+      - echo "SHOULD_TRAIN=$SHOULD_TRAIN"
       
   build:
     commands:
       - echo Build started on `date`
-      
-      # Ensure required files exist
+      - mkdir -p scripts
+      - echo "Creating placeholder files if they don't exist"
       - |
-        # Create scripts directory if it doesn't exist
-        mkdir -p scripts
-        
-        # Ensure train.py exists
         if [ ! -f train.py ]; then
-          echo "Creating placeholder train.py"
+          echo "Creating train.py"
           cat > train.py << 'EOL'
           #!/usr/bin/env python
           import os, sys, json, logging
@@ -111,10 +73,9 @@ phases:
           EOL
           chmod +x train.py
         fi
-        
-        # Ensure inference.py exists
+      - |
         if [ ! -f inference.py ]; then
-          echo "Creating placeholder inference.py"
+          echo "Creating inference.py"
           cat > inference.py << 'EOL'
           import os, json, logging
           logging.basicConfig(level=logging.INFO)
@@ -135,8 +96,7 @@ phases:
               return json.dumps(prediction)
           EOL
         fi
-        
-        # Ensure start_training_job.py exists
+      - |
         if [ ! -f scripts/start_training_job.py ]; then
           echo "Creating start_training_job.py"
           cat > scripts/start_training_job.py << 'EOL'
@@ -145,12 +105,12 @@ phases:
           
           def main():
               parser = argparse.ArgumentParser(description='Start a SageMaker training job')
-              parser.add_argument('--job-name', required=True, help='Training job name')
-              parser.add_argument('--role-arn', required=True, help='SageMaker execution role ARN')
-              parser.add_argument('--image-uri', required=True, help='ECR image URI')
-              parser.add_argument('--bucket', required=True, help='S3 bucket for model artifacts')
-              parser.add_argument('--prefix', required=True, help='S3 prefix for model artifacts')
-              parser.add_argument('--instance-type', default='ml.t2.medium', help='Instance type')
+              parser.add_argument('--job-name', required=True)
+              parser.add_argument('--role-arn', required=True)
+              parser.add_argument('--image-uri', required=True)
+              parser.add_argument('--bucket', required=True)
+              parser.add_argument('--prefix', required=True)
+              parser.add_argument('--instance-type', default='ml.t2.medium')
               args = parser.parse_args()
               
               sagemaker = boto3.client('sagemaker')
@@ -189,13 +149,9 @@ phases:
           EOL
           chmod +x scripts/start_training_job.py
         fi
-      
-      # Build Docker image (with explicit variable expansion)
       - echo "Building Docker image with tag: $ECR_REPOSITORY_URI:$IMAGE_TAG"
       - docker build --no-cache -t $ECR_REPOSITORY_URI:$IMAGE_TAG .
       - docker tag $ECR_REPOSITORY_URI:$IMAGE_TAG $ECR_REPOSITORY_URI:latest
-      
-      # Create or update CloudFormation stack
       - |
         if [ "$STACK_EXISTS" = "0" ]; then
           echo "Creating CloudFormation stack..."
@@ -221,8 +177,6 @@ phases:
       - echo "Pushing Docker image to ECR..."
       - docker push $ECR_REPOSITORY_URI:$IMAGE_TAG
       - docker push $ECR_REPOSITORY_URI:latest
-      
-      # Start training job if needed
       - |
         if [ "$SHOULD_TRAIN" = "1" ]; then
           echo "Starting SageMaker training job..."
@@ -244,8 +198,6 @@ phases:
         else
           echo "Skipping training job based on commit message flags"
         fi
-      
-      # Create build output file
       - |
         echo "Creating build output file..."
         cat > build_output.json << EOF
