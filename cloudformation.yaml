@@ -89,7 +89,7 @@ Resources:
               - Effect: Allow
                 Action:
                   - sagemaker:InvokeEndpoint
-                Resource: !GetAtt SageMakerEndpoint.Arn
+                Resource: !Sub "arn:aws:sagemaker:${AWS::Region}:${AWS::AccountId}:endpoint/${SageMakerEndpointName}"
 
   TextToImageApi:
     Type: AWS::ApiGateway::RestApi
