@@ -15,7 +15,7 @@ CLIP_MODEL_TYPE = "ViT-B/32"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 CLIP_EMBEDDING_DIM = 512  # Dimension of CLIP text embeddings for ViT-B/32
 HIDDEN_DIM = 256  # Hidden dimension for the MoE model
-NUM_EXPERTS = 5
+NUM_EXPERTS = 8  # Number of experts in the MoE model 
 
 def load_clip_model():
     """

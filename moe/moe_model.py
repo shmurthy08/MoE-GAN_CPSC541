@@ -157,6 +157,9 @@ class BayesianMoEGatingNetwork(nn.Module):
         # Bayesian layers
         self.bayesian_layer1 = BayesianLinear(input_dim, hidden_dim)
         self.bayesian_layer2 = BayesianLinear(hidden_dim, hidden_dim)
+        self.bayesian_layer2a = BayesianLinear(hidden_dim, hidden_dim)
+        self.bayesian_layer2b = BayesianLinear(hidden_dim, hidden_dim)
+        self.bayesian_layer2c = BayesianLinear(hidden_dim, num_experts)
         self.bayesian_layer3 = BayesianLinear(hidden_dim, num_experts)
         
         # Activation function
@@ -232,6 +235,21 @@ class BayesianMoEGatingNetwork(nn.Module):
         x, kl2 = self.bayesian_layer2(x, sample)
         x = self.activation(x)
         kl += kl2
+        
+        # 2a Bayesian Layer
+        x, kl2a = self.bayesian_layer2a(x, sample)
+        x = self.activation(x)
+        kl += kl2a
+        
+        # 2b Bayesian Layer
+        x, kl2b = self.bayesian_layer2b(x, sample)
+        x = self.activation(x)
+        kl += kl2b
+        
+        # 2c Bayesian Layer
+        x, kl2c = self.bayesian_layer2c(x, sample)
+        x = self.activation(x)
+        kl += kl2c
         
         # Output Bayesian layer
         logits, kl3 = self.bayesian_layer3(x, sample)
@@ -318,7 +336,7 @@ class MixtureOfExperts(nn.Module):
         # Each expert would specialize in generating different types of images
         # For now, we just use placeholder experts
         self.expert_descriptions = [
-            "General Expert for all categories"
+            "General Expert for all categories",
             "Expert for natural landscapes",
             "Expert for portraits and people",
             "Expert for urban environments",
