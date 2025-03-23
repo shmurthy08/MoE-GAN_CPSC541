@@ -154,18 +154,44 @@ class BayesianMoEGatingNetwork(nn.Module):
         # Activation function
         self.activation = nn.ReLU()
 
-    def forward(self, x, sample=True, calculate_log_probs=False):
+    def monte_carlo_sample(self, x, num_samples=None):
         """
-        Forward pass with optional sampling and log probability calculation.
+        Perform Monte Carlo sampling to estimate uncertainty without recursion.
         
         Args:
-            x: Input tensor (CLIP text embeddings)
-            sample: Whether to sample from the posterior (default: True)
-            calculate_log_probs: Whether to calculate log probabilities (default: False)
+            x: Input tensor (original CLIP embeddings)
+            num_samples: Number of samples (default: None, uses self.num_samples)
         
         Returns:
-            Expert probabilities, KL divergence, and uncertainty (optional)
+            Mean probabilities and uncertainty
         """
+        if num_samples is None:
+            num_samples = self.num_samples
+            
+        with torch.no_grad():
+            mc_samples = []
+            for _ in range(num_samples):
+                # Run the forward pass with sample=True but calculate_log_probs=False
+                # First layer
+                h1, _ = self.bayesian_layer1(x, True)
+                h1 = self.activation(h1)
+                
+                # Second layer
+                h2, _ = self.bayesian_layer2(h1, True)
+                h2 = self.activation(h2)
+                
+                # Output layer
+                logits, _ = self.bayesian_layer3(h2, True)
+                probs = F.softmax(logits, dim=1)
+                mc_samples.append(probs)
+            
+            # Stack samples and compute uncertainty
+            mc_samples = torch.stack(mc_samples, dim=0)
+            mean_probs = torch.mean(mc_samples, dim=0)
+            uncertainty = torch.std(mc_samples, dim=0)
+            
+        return mean_probs, uncertainty
+    def forward(self, x, sample=True, calculate_log_probs=False):
         # Initialize KL divergence
         kl = 0
         
@@ -188,19 +214,9 @@ class BayesianMoEGatingNetwork(nn.Module):
         
         # If sampling for uncertainty estimation
         if sample and calculate_log_probs:
-            with torch.no_grad():
-                # Perform multiple forward passes for Monte Carlo sampling
-                mc_samples = []
-                for _ in range(self.num_samples):
-                    _, _, mc_logits = self.forward(x, sample=True, calculate_log_probs=False)
-                    mc_probs = F.softmax(mc_logits, dim=1)
-                    mc_samples.append(mc_probs)
-                
-                # Stack samples and compute uncertainty
-                mc_samples = torch.stack(mc_samples, dim=0)
-                uncertainty = torch.std(mc_samples, dim=0)
-                
-                return expert_probs, kl, logits, uncertainty
+            # Use the separate Monte Carlo sampling method instead of recursive call
+            _, uncertainty = self.monte_carlo_sample(x.new_zeros((x.size(0), self.input_dim)))
+            return expert_probs, kl, logits, uncertainty
         
         return expert_probs, kl, logits
 
@@ -274,11 +290,15 @@ class MixtureOfExperts(nn.Module):
         # Each expert would specialize in generating different types of images
         # For now, we just use placeholder experts
         self.expert_descriptions = [
-            "General purpose expert",
+            "General Expert for all categories"
             "Expert for natural landscapes",
             "Expert for portraits and people",
-            "Expert for abstract concepts",
-            "Expert for urban environments"
+            "Expert for urban environments",
+            "Expert for animals and wildlife",
+            "Expert for abstract concepts and styles",
+            "Expert for indoor scenes and objects",
+            "Expert for transportation and vehicles",
+            "Expert for weather and atmospheric conditions"
         ][:num_experts]  # Truncate to actual number of experts
 
     def forward(self, text_embedding):
