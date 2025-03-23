@@ -58,9 +58,9 @@ class BayesianLinear(nn.Module):
         """
         # If sampling, draw random weights from the posterior
         if sample:
-            # Convert rho to sigma using softplus function
-            weight_sigma = torch.log1p(torch.exp(self.weight_rho))
-            bias_sigma = torch.log1p(torch.exp(self.bias_rho))
+            # Convert rho to sigma using F.softplus function
+            weight_sigma = F.softplus(self.weight_rho)
+            bias_sigma = F.softplus(self.bias_rho)
             
             # Sample from the posterior using the reparameterization trick
             weight_epsilon = torch.randn_like(self.weight_mu)
@@ -164,129 +164,186 @@ class BayesianMoEGatingNetwork(nn.Module):
         # Activation function
         self.activation = nn.ReLU()
 
-        def metropolis_hastings_sample(self, x, num_samples=None, burn_in=100, step_size=0.01):
-            """
-            Perform Metropolis-Hastings MCMC sampling for uncertainty estimation.
+    def hamiltonian_monte_carlo(self, x, num_samples=None, burn_in=100, 
+                           step_size=0.01, num_steps=10):
+        """
+        Perform Hamiltonian Monte Carlo sampling for uncertainty estimation.
+        
+        Args:
+            x: Input tensor (text embeddings)
+            num_samples: Number of samples to collect after burn-in
+            burn_in: Number of samples to discard during burn-in phase
+            step_size: Step size for leapfrog integration (epsilon)
+            num_steps: Number of leapfrog steps (L)
+        
+        Returns:
+            Mean probabilities and uncertainty estimates
+        """
+        if num_samples is None:
+            num_samples = self.num_samples
+        
+        # Save original model state
+        original_state = {name: param.data.clone() for name, param in self.named_parameters()}
+        
+        # Storage for accepted samples
+        accepted_probs = []
+        
+        # Function to compute log posterior and its gradient
+        def compute_log_posterior_and_grad():
+            # Zero all gradients
+            for param in self.parameters():
+                if param.grad is not None:
+                    param.grad.zero_()
             
-            Args:
-                x: Input tensor (text embeddings)
-                num_samples: Number of samples to collect after burn-in (default: self.num_samples)
-                burn_in: Number of samples to discard during burn-in phase (default: 100)
-                step_size: Step size for the proposal distribution (default: 0.01)
+            # Forward pass with autograd enabled
+            h1, kl1 = self.bayesian_layer1(x, sample=False)
+            h1 = self.activation(h1)
             
-            Returns:
-                Mean probabilities and uncertainty estimates
-            """
-            if num_samples is None:
-                num_samples = self.num_samples
+            h2, kl2 = self.bayesian_layer2(h1, sample=False)
+            h2 = self.activation(h2)
             
-            # Save original model state
-            original_state = {name: param.data.clone() for name, param in self.named_parameters()}
+            h2a, kl2a = self.bayesian_layer2a(h2, sample=False)
+            h2a = self.activation(h2a)
             
-            # Storage for accepted samples
-            accepted_probs = []
+            h2b, kl2b = self.bayesian_layer2b(h2a, sample=False)
+            h2b = self.activation(h2b)
             
-            # MCMC statistics
-            total_iters = burn_in + num_samples
-            accepted_count = 0
+            logits, kl3 = self.bayesian_layer3(h2b, sample=False)
+            probs = F.softmax(logits, dim=1)
             
-            # Function to get model output and log posterior probability
-            def compute_log_posterior():
-                with torch.no_grad():
-                    # Forward pass through all Bayesian layers
-                    h1, kl1 = self.bayesian_layer1(x, False)  # Use current weights, no sampling
-                    h1 = self.activation(h1)
-                    
-                    h2, kl2 = self.bayesian_layer2(h1, False)
-                    h2 = self.activation(h2)
-                    
-                    h2a, kl2a = self.bayesian_layer2a(h2, False)
-                    h2a = self.activation(h2a)
-                    
-                    h2b, kl2b = self.bayesian_layer2b(h2a, False)
-                    h2b = self.activation(h2b)
-                    
-                    logits, kl3 = self.bayesian_layer3(h2b, False)
-                    probs = F.softmax(logits, dim=1)
-                    
-                    # Log likelihood (approximate using pseudo-labels)
-                    # In a real scenario with labels, use cross-entropy with true labels
-                    pseudo_labels = torch.argmax(logits, dim=1)
-                    log_likelihood = -F.cross_entropy(logits, pseudo_labels, reduction='sum')
-                    
-                    # Log prior (using negative KL divergence as proxy)
-                    log_prior = -(kl1 + kl2 + kl2a + kl2b + kl3)
-                    
-                    # Log posterior = log likelihood + log prior
-                    log_posterior = log_likelihood + log_prior
-                    
-                    return probs, log_posterior
+            # Log likelihood
+            pseudo_labels = torch.argmax(logits, dim=1)
+            log_likelihood = -F.cross_entropy(logits, pseudo_labels, reduction='sum')
             
-            # Initial state
-            current_probs, current_log_posterior = compute_log_posterior()
+            # Log prior (using negative KL divergence as proxy)
+            log_prior = -(kl1 + kl2 + kl2a + kl2b + kl3)
             
-            # MCMC loop
-            for i in range(total_iters):
-                # Save current parameter values
-                current_state = {name: param.data.clone() for name, param in self.named_parameters()}
+            # Log posterior = log likelihood + log prior
+            log_posterior = log_likelihood + log_prior
+            
+            # Compute gradients
+            log_posterior.backward()
+            
+            # Get gradients as a single vector
+            grad_vector = []
+            for param in self.parameters():
+                if param.grad is not None:
+                    grad_vector.append(param.grad.view(-1))
+            
+            grad_vector = torch.cat(grad_vector)
+            
+            return probs, log_posterior.item(), grad_vector
+        
+        # Function to get parameters as a single vector
+        def get_param_vector():
+            param_vector = []
+            for param in self.parameters():
+                param_vector.append(param.data.view(-1))
+            return torch.cat(param_vector)
+        
+        # Function to set parameters from a single vector
+        def set_param_vector(param_vector):
+            start_idx = 0
+            for param in self.parameters():
+                param_size = param.numel()
+                param.data = param_vector[start_idx:start_idx + param_size].view(param.shape)
+                start_idx += param_size
+        
+        # Initialize variables for HMC
+        total_iters = burn_in + num_samples
+        accepted_count = 0
+        
+        # Initial state
+        current_q = get_param_vector()
+        current_probs, current_log_posterior, current_grad = compute_log_posterior_and_grad()
+        
+        print(f"Starting HMC with {total_iters} iterations")
+        print(f"Initial log posterior: {current_log_posterior:.4f}")
+        
+        # HMC loop
+        for i in range(total_iters):
+            # Initialize momentum variable from standard normal
+            p = torch.randn_like(current_q)
+            current_p = p.clone()
+            
+            # Compute initial Hamiltonian
+            current_h = -current_log_posterior + 0.5 * torch.sum(current_p**2)
+            
+            # Make a deep copy of the current parameters
+            new_q = current_q.clone()
+            
+            # First half-step for momentum
+            set_param_vector(new_q)
+            _, _, grad = compute_log_posterior_and_grad()
+            p = p + 0.5 * step_size * grad
+            
+            # Full leapfrog steps
+            for j in range(num_steps):
+                # Full step for position
+                new_q = new_q + step_size * p
                 
-                # Propose new parameters (random walk)
-                for name, param in self.named_parameters():
-                    # Only perturb mean parameters (not rho parameters)
-                    if 'weight_mu' in name or 'bias_mu' in name:
-                        param.data.add_(step_size * torch.randn_like(param))
-                
-                # Evaluate proposal
-                proposed_probs, proposed_log_posterior = compute_log_posterior()
-                
-                # Metropolis acceptance criterion
-                log_accept_ratio = proposed_log_posterior - current_log_posterior
-                
-                # Accept or reject
-                if torch.log(torch.rand(1)) < log_accept_ratio:
-                    # Accept the proposal
-                    current_probs = proposed_probs
-                    current_log_posterior = proposed_log_posterior
-                    accepted_count += 1
-                else:
-                    # Reject the proposal, revert to previous state
-                    for name, param in self.named_parameters():
-                        if name in current_state:
-                            param.data.copy_(current_state[name])
-                
-                # Store sample if past burn-in
-                if i >= burn_in:
-                    accepted_probs.append(current_probs.clone())
-                
-                # Print progress occasionally
-                if (i + 1) % 20 == 0:
-                    current_rate = accepted_count / (i + 1)
-                    print(f"MCMC iteration {i+1}/{total_iters}, acceptance rate: {current_rate:.4f}")
+                # Full step for momentum (except at the end)
+                if j < num_steps - 1:
+                    set_param_vector(new_q)
+                    _, _, grad = compute_log_posterior_and_grad()
+                    p = p + step_size * grad
             
-            # Restore original model parameters
-            for name, param in self.named_parameters():
-                if name in original_state:
-                    param.data.copy_(original_state[name])
+            # Last half-step for momentum
+            set_param_vector(new_q)
+            new_probs, new_log_posterior, grad = compute_log_posterior_and_grad()
+            p = p + 0.5 * step_size * grad
             
-            # Compute statistics from accepted samples
-            if accepted_probs:  # Check if we have any accepted samples
-                accepted_probs = torch.stack(accepted_probs, dim=0)
-                mean_probs = torch.mean(accepted_probs, dim=0)
-                uncertainty = torch.std(accepted_probs, dim=0)
+            # Negate momentum for reversibility
+            p = -p
+            
+            # Compute new Hamiltonian
+            new_h = -new_log_posterior + 0.5 * torch.sum(p**2)
+            
+            # Metropolis acceptance step
+            log_accept_ratio = current_h - new_h
+            
+            if torch.log(torch.rand(1)) < log_accept_ratio:
+                # Accept the proposal
+                current_q = new_q
+                current_log_posterior = new_log_posterior
+                current_probs = new_probs
+                accepted_count += 1
             else:
-                # Fallback if no samples were accepted
-                print("Warning: No samples were accepted. Using current model state.")
-                mean_probs = current_probs
-                uncertainty = torch.zeros_like(current_probs)
+                # Reject the proposal, revert to previous state
+                set_param_vector(current_q)
             
-            print(f"Final MCMC acceptance rate: {accepted_count/total_iters:.4f}")
+            # Store sample if past burn-in
+            if i >= burn_in:
+                accepted_probs.append(current_probs.clone())
             
-            return mean_probs, uncertainty
-    
+            # Print progress
+            if (i + 1) % 20 == 0:
+                accept_rate = accepted_count / (i + 1)
+                print(f"HMC iteration {i+1}/{total_iters}, acceptance rate: {accept_rate:.4f}, log posterior: {current_log_posterior:.4f}")
+        
+        # Ensure we have samples - if none were accepted, use current model state
+        if len(accepted_probs) == 0:
+            print("Warning: No samples were accepted. Using single sample from current model state.")
+            accepted_probs.append(current_probs.clone())
+        
+        # Compute statistics from accepted samples
+        accepted_probs = torch.stack(accepted_probs, dim=0)
+        mean_probs = torch.mean(accepted_probs, dim=0)
+        uncertainty = torch.std(accepted_probs, dim=0) + 1e-6
+        
+        # Restore original model parameters
+        for name, param in self.named_parameters():
+            if name in original_state:
+                param.data.copy_(original_state[name])
+        
+        print(f"Final HMC acceptance rate: {accepted_count/total_iters:.4f}")
+        
+        return mean_probs, uncertainty
+
     
     def monte_carlo_sample(self, x, num_samples=None):
         """
-        Use Metroplis-Hastings MCMC sampling for uncertainty estimation.
+        Use hamiltonian MCMC sampling for uncertainty estimation.
         
         Args:
             x: Input tensor (text embeddings)
@@ -296,7 +353,7 @@ class BayesianMoEGatingNetwork(nn.Module):
             Mean probabilities and uncertainty estimates
         
         """
-        return self.metropolis_hastings_sample(x, num_samples=num_samples)
+        return self.hamiltonian_monte_carlo(x, num_samples=num_samples)
     def forward(self, x, text_embedding=None, sample=True, calculate_log_probs=False):
         """
         Forward pass with optional text integration (Aurora-style).
@@ -312,6 +369,9 @@ class BayesianMoEGatingNetwork(nn.Module):
         """
         # Initialize KL divergence
         kl = 0
+        
+        # Store original input for MCMC sampling
+        original_input = x.clone()
         
         # First Bayesian layer
         x, kl1 = self.bayesian_layer1(x, sample)
@@ -352,7 +412,7 @@ class BayesianMoEGatingNetwork(nn.Module):
         # If sampling for uncertainty estimation
         if sample and calculate_log_probs:
             # Use the separate Monte Carlo sampling method instead of recursive call
-            _, uncertainty = self.monte_carlo_sample(x.new_zeros((x.size(0), self.input_dim)))
+            _, uncertainty = self.monte_carlo_sample(original_input)
             return expert_probs, kl, logits, uncertainty
         
         return expert_probs, kl, logits
@@ -371,7 +431,7 @@ class BayesianMoEGatingNetwork(nn.Module):
         """
         with torch.no_grad():
             # Use Metropolis-Hastings MCMC to estimate expert probabilities
-            mean_probs, uncertainty = self.metropolis_hastings_sample(
+            mean_probs, uncertainty = self.hamiltonian_monte_carlo(
                 text_embedding, 
                 num_samples=self.num_samples
             )
@@ -485,7 +545,7 @@ class MixtureOfExperts(nn.Module):
 
 
 # Training function for the Bayesian MoE Gating Network
-def train_bayesian_moe_gating(model, train_dataloader, val_dataloader, epochs=10, lr=0.001, kl_weight=0.1, device='cuda'):
+def train_bayesian_moe_gating(model, train_dataloader, val_dataloader, epochs=10, lr=0.001, kl_weight=0.01, device='cuda'):
     """
     Train the Bayesian MoE Gating Network.
     

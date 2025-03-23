@@ -23,7 +23,7 @@ from data_processing.data_processing_pipeline import ProcessedMSCOCODataset, cli
 CLIP_MODEL_TYPE = "ViT-B/32"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 CLIP_EMBEDDING_DIM = 512  # Dimension of CLIP text embeddings for ViT-B/32
-HIDDEN_DIM = 256
+HIDDEN_DIM = 256  # Hidden dimension for the MoE model; increased for better performance
 NUM_EXPERTS = 5
 BATCH_SIZE = 32
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "moe_results")

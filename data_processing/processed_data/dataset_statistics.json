@@ -1,88 +1,88 @@
 {
-    "total_samples": 100,
-    "avg_caption_length": 10.02,
-    "min_caption_length": 7,
-    "max_caption_length": 15,
+    "total_samples": 3997,
+    "avg_caption_length": 10.41981486114586,
+    "min_caption_length": 6,
+    "max_caption_length": 39,
     "top_words": [
         [
             "a",
-            156
+            6952
         ],
         [
             "on",
-            39
-        ],
-        [
-            "in",
-            38
+            1526
         ],
         [
             "of",
-            37
+            1519
         ],
         [
             "the",
-            29
+            1197
+        ],
+        [
+            "in",
+            1129
         ],
         [
             "with",
-            25
+            1021
         ],
         [
             "and",
-            17
-        ],
-        [
-            "to",
-            15
-        ],
-        [
-            "man",
-            14
-        ],
-        [
-            "next",
-            12
+            865
         ],
         [
             "is",
-            10
+            570
         ],
         [
-            "standing",
-            10
+            "man",
+            533
         ],
         [
-            "holding",
-            8
-        ],
-        [
-            "people",
-            8
+            "to",
+            523
         ],
         [
             "sitting",
-            7
+            407
         ],
         [
-            "his",
-            7
+            "standing",
+            334
         ],
         [
-            "top",
-            6
-        ],
-        [
-            "are",
-            6
-        ],
-        [
-            "at",
-            6
+            "next",
+            329
         ],
         [
             "an",
-            6
+            295
+        ],
+        [
+            "two",
+            294
+        ],
+        [
+            "white",
+            283
+        ],
+        [
+            "people",
+            263
+        ],
+        [
+            "at",
+            242
+        ],
+        [
+            "holding",
+            233
+        ],
+        [
+            "woman",
+            225
         ]
     ]
 }
