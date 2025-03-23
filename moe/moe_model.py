@@ -128,7 +128,8 @@ class BayesianMoEGatingNetwork(nn.Module):
     Bayesian Mixture of Experts Gating Network that determines which expert to use
     for each input prompt, with uncertainty estimation through Bayesian techniques.
     """
-    def __init__(self, input_dim, hidden_dim, num_experts, num_samples=10):
+    # First, update the __init__ method to accept the text embedding dimension
+    def __init__(self, input_dim, hidden_dim, num_experts, text_dim=None, num_samples=10):
         """
         Initialize Bayesian MoE Gating Network.
         
@@ -136,6 +137,7 @@ class BayesianMoEGatingNetwork(nn.Module):
             input_dim: Dimension of the input (CLIP text embeddings)
             hidden_dim: Dimension of the hidden layer
             num_experts: Number of experts in the MoE model
+            text_dim: Dimension of the text embedding for integrated routing
             num_samples: Number of MC samples for uncertainty estimation (default: 10)
         """
         super(BayesianMoEGatingNetwork, self).__init__()
@@ -145,7 +147,13 @@ class BayesianMoEGatingNetwork(nn.Module):
         self.hidden_dim = hidden_dim
         self.num_experts = num_experts
         self.num_samples = num_samples
+        self.text_dim = text_dim
         
+        # Text integration
+        if text_dim is not None:
+            # Text projection layer
+            self.text_projection = nn.Linear(text_dim, hidden_dim)
+            
         # Bayesian layers
         self.bayesian_layer1 = BayesianLinear(input_dim, hidden_dim)
         self.bayesian_layer2 = BayesianLinear(hidden_dim, hidden_dim)
@@ -191,7 +199,19 @@ class BayesianMoEGatingNetwork(nn.Module):
             uncertainty = torch.std(mc_samples, dim=0)
             
         return mean_probs, uncertainty
-    def forward(self, x, sample=True, calculate_log_probs=False):
+    def forward(self, x, text_embedding=None, sample=True, calculate_log_probs=False):
+        """
+        Forward pass with optional text integration (Aurora-style).
+        
+        Args:
+            x: Input tensor (feature map)
+            text_embedding: Text embedding for integrated routing (default: None)
+            sample: Whether to sample from the posterior (default: True)
+            calculate_log_probs: Whether to calculate log probabilities (default: False)
+        
+        Returns:
+            Expert probabilities, KL divergence, and uncertainty (optional)
+        """
         # Initialize KL divergence
         kl = 0
         
@@ -199,6 +219,14 @@ class BayesianMoEGatingNetwork(nn.Module):
         x, kl1 = self.bayesian_layer1(x, sample)
         x = self.activation(x)
         kl += kl1
+        
+        # Integrate text information if available (Aurora approach)
+        if text_embedding is not None and hasattr(self, 'text_projection'):
+            # Project text embedding
+            text_features = self.text_projection(text_embedding)
+            
+            # Element-wise multiplication for feature conditioning
+            x = x * text_features
         
         # Second Bayesian layer
         x, kl2 = self.bayesian_layer2(x, sample)

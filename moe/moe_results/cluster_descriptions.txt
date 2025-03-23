@@ -1,5 +1,8 @@
-Cluster 0: Expert for landscape, vehicle, street
-Cluster 1: Expert for food, meal, dog
-Cluster 2: Expert for landscape, building, vehicle
-Cluster 3: Expert for food, train, vehicle
-Cluster 4: Expert for wildlife, landscape, mountains
+Cluster 0: Expert for landscape, street, car
+Cluster 1: Expert for landscape, dog, nature
+Cluster 2: Expert for meal, food, dining
+Cluster 3: Expert for kitchen, cooking, food
+Cluster 4: Expert for vehicle, portrait, phone
+Cluster 5: Expert for wildlife, landscape, mountains
+Cluster 6: Expert for train, transportation, landscape
+Cluster 7: Expert for kitchen, cooking, phone
