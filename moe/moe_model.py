@@ -159,49 +159,144 @@ class BayesianMoEGatingNetwork(nn.Module):
         self.bayesian_layer2 = BayesianLinear(hidden_dim, hidden_dim)
         self.bayesian_layer2a = BayesianLinear(hidden_dim, hidden_dim)
         self.bayesian_layer2b = BayesianLinear(hidden_dim, hidden_dim)
-        self.bayesian_layer2c = BayesianLinear(hidden_dim, num_experts)
         self.bayesian_layer3 = BayesianLinear(hidden_dim, num_experts)
         
         # Activation function
         self.activation = nn.ReLU()
 
+        def metropolis_hastings_sample(self, x, num_samples=None, burn_in=100, step_size=0.01):
+            """
+            Perform Metropolis-Hastings MCMC sampling for uncertainty estimation.
+            
+            Args:
+                x: Input tensor (text embeddings)
+                num_samples: Number of samples to collect after burn-in (default: self.num_samples)
+                burn_in: Number of samples to discard during burn-in phase (default: 100)
+                step_size: Step size for the proposal distribution (default: 0.01)
+            
+            Returns:
+                Mean probabilities and uncertainty estimates
+            """
+            if num_samples is None:
+                num_samples = self.num_samples
+            
+            # Save original model state
+            original_state = {name: param.data.clone() for name, param in self.named_parameters()}
+            
+            # Storage for accepted samples
+            accepted_probs = []
+            
+            # MCMC statistics
+            total_iters = burn_in + num_samples
+            accepted_count = 0
+            
+            # Function to get model output and log posterior probability
+            def compute_log_posterior():
+                with torch.no_grad():
+                    # Forward pass through all Bayesian layers
+                    h1, kl1 = self.bayesian_layer1(x, False)  # Use current weights, no sampling
+                    h1 = self.activation(h1)
+                    
+                    h2, kl2 = self.bayesian_layer2(h1, False)
+                    h2 = self.activation(h2)
+                    
+                    h2a, kl2a = self.bayesian_layer2a(h2, False)
+                    h2a = self.activation(h2a)
+                    
+                    h2b, kl2b = self.bayesian_layer2b(h2a, False)
+                    h2b = self.activation(h2b)
+                    
+                    logits, kl3 = self.bayesian_layer3(h2b, False)
+                    probs = F.softmax(logits, dim=1)
+                    
+                    # Log likelihood (approximate using pseudo-labels)
+                    # In a real scenario with labels, use cross-entropy with true labels
+                    pseudo_labels = torch.argmax(logits, dim=1)
+                    log_likelihood = -F.cross_entropy(logits, pseudo_labels, reduction='sum')
+                    
+                    # Log prior (using negative KL divergence as proxy)
+                    log_prior = -(kl1 + kl2 + kl2a + kl2b + kl3)
+                    
+                    # Log posterior = log likelihood + log prior
+                    log_posterior = log_likelihood + log_prior
+                    
+                    return probs, log_posterior
+            
+            # Initial state
+            current_probs, current_log_posterior = compute_log_posterior()
+            
+            # MCMC loop
+            for i in range(total_iters):
+                # Save current parameter values
+                current_state = {name: param.data.clone() for name, param in self.named_parameters()}
+                
+                # Propose new parameters (random walk)
+                for name, param in self.named_parameters():
+                    # Only perturb mean parameters (not rho parameters)
+                    if 'weight_mu' in name or 'bias_mu' in name:
+                        param.data.add_(step_size * torch.randn_like(param))
+                
+                # Evaluate proposal
+                proposed_probs, proposed_log_posterior = compute_log_posterior()
+                
+                # Metropolis acceptance criterion
+                log_accept_ratio = proposed_log_posterior - current_log_posterior
+                
+                # Accept or reject
+                if torch.log(torch.rand(1)) < log_accept_ratio:
+                    # Accept the proposal
+                    current_probs = proposed_probs
+                    current_log_posterior = proposed_log_posterior
+                    accepted_count += 1
+                else:
+                    # Reject the proposal, revert to previous state
+                    for name, param in self.named_parameters():
+                        if name in current_state:
+                            param.data.copy_(current_state[name])
+                
+                # Store sample if past burn-in
+                if i >= burn_in:
+                    accepted_probs.append(current_probs.clone())
+                
+                # Print progress occasionally
+                if (i + 1) % 20 == 0:
+                    current_rate = accepted_count / (i + 1)
+                    print(f"MCMC iteration {i+1}/{total_iters}, acceptance rate: {current_rate:.4f}")
+            
+            # Restore original model parameters
+            for name, param in self.named_parameters():
+                if name in original_state:
+                    param.data.copy_(original_state[name])
+            
+            # Compute statistics from accepted samples
+            if accepted_probs:  # Check if we have any accepted samples
+                accepted_probs = torch.stack(accepted_probs, dim=0)
+                mean_probs = torch.mean(accepted_probs, dim=0)
+                uncertainty = torch.std(accepted_probs, dim=0)
+            else:
+                # Fallback if no samples were accepted
+                print("Warning: No samples were accepted. Using current model state.")
+                mean_probs = current_probs
+                uncertainty = torch.zeros_like(current_probs)
+            
+            print(f"Final MCMC acceptance rate: {accepted_count/total_iters:.4f}")
+            
+            return mean_probs, uncertainty
+    
+    
     def monte_carlo_sample(self, x, num_samples=None):
         """
-        Perform Monte Carlo sampling to estimate uncertainty without recursion.
+        Use Metroplis-Hastings MCMC sampling for uncertainty estimation.
         
         Args:
-            x: Input tensor (original CLIP embeddings)
-            num_samples: Number of samples (default: None, uses self.num_samples)
+            x: Input tensor (text embeddings)
+            num_samples: Number of samples to collect (default: self.num_samples)
         
         Returns:
-            Mean probabilities and uncertainty
+            Mean probabilities and uncertainty estimates
+        
         """
-        if num_samples is None:
-            num_samples = self.num_samples
-            
-        with torch.no_grad():
-            mc_samples = []
-            for _ in range(num_samples):
-                # Run the forward pass with sample=True but calculate_log_probs=False
-                # First layer
-                h1, _ = self.bayesian_layer1(x, True)
-                h1 = self.activation(h1)
-                
-                # Second layer
-                h2, _ = self.bayesian_layer2(h1, True)
-                h2 = self.activation(h2)
-                
-                # Output layer
-                logits, _ = self.bayesian_layer3(h2, True)
-                probs = F.softmax(logits, dim=1)
-                mc_samples.append(probs)
-            
-            # Stack samples and compute uncertainty
-            mc_samples = torch.stack(mc_samples, dim=0)
-            mean_probs = torch.mean(mc_samples, dim=0)
-            uncertainty = torch.std(mc_samples, dim=0)
-            
-        return mean_probs, uncertainty
+        return self.metropolis_hastings_sample(x, num_samples=num_samples)
     def forward(self, x, text_embedding=None, sample=True, calculate_log_probs=False):
         """
         Forward pass with optional text integration (Aurora-style).
@@ -246,10 +341,6 @@ class BayesianMoEGatingNetwork(nn.Module):
         x = self.activation(x)
         kl += kl2b
         
-        # 2c Bayesian Layer
-        x, kl2c = self.bayesian_layer2c(x, sample)
-        x = self.activation(x)
-        kl += kl2c
         
         # Output Bayesian layer
         logits, kl3 = self.bayesian_layer3(x, sample)
@@ -268,7 +359,7 @@ class BayesianMoEGatingNetwork(nn.Module):
 
     def predict_expert(self, text_embedding, threshold=0.7, return_uncertainty=False):
         """
-        Predict which expert to use for a given text embedding.
+        Predict which expert to use for a given text embedding using MCMC.
         
         Args:
             text_embedding: CLIP text embedding tensor
@@ -279,16 +370,11 @@ class BayesianMoEGatingNetwork(nn.Module):
             Selected expert index/indices, probabilities, and uncertainty (optional)
         """
         with torch.no_grad():
-            # Make multiple forward passes for Monte Carlo sampling
-            mc_samples = []
-            for _ in range(self.num_samples):
-                probs, _, _ = self.forward(text_embedding, sample=True)
-                mc_samples.append(probs)
-            
-            # Stack samples and compute mean and uncertainty
-            mc_samples = torch.stack(mc_samples, dim=0)
-            mean_probs = torch.mean(mc_samples, dim=0)
-            uncertainty = torch.std(mc_samples, dim=0)
+            # Use Metropolis-Hastings MCMC to estimate expert probabilities
+            mean_probs, uncertainty = self.metropolis_hastings_sample(
+                text_embedding, 
+                num_samples=self.num_samples
+            )
             
             # Select experts based on threshold
             selected_experts = []
@@ -304,7 +390,6 @@ class BayesianMoEGatingNetwork(nn.Module):
                 return selected_experts, mean_probs, uncertainty
             else:
                 return selected_experts, mean_probs
-
 
 class MixtureOfExperts(nn.Module):
     """

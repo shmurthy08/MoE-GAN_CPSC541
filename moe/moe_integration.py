@@ -246,7 +246,7 @@ def train_moe_with_clusters(train_dataset, val_dataset, epochs=10, lr=0.001, kl_
     criterion = torch.nn.CrossEntropyLoss()
     
     # ADDED: Balance loss weight
-    balance_weight = 0.01
+    balance_weight = 0.001
     
     # Training statistics
     train_losses = []
