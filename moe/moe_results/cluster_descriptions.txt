@@ -1,0 +1,5 @@
+Cluster 0: Expert for landscape, vehicle, street
+Cluster 1: Expert for food, meal, dog
+Cluster 2: Expert for landscape, building, vehicle
+Cluster 3: Expert for food, train, vehicle
+Cluster 4: Expert for wildlife, landscape, mountains

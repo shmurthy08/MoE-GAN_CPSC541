@@ -1,88 +1,88 @@
 {
-    "total_samples": 1000,
-    "avg_caption_length": 10.366,
+    "total_samples": 100,
+    "avg_caption_length": 10.02,
     "min_caption_length": 7,
-    "max_caption_length": 26,
+    "max_caption_length": 15,
     "top_words": [
         [
             "a",
-            1719
+            156
         ],
         [
             "on",
-            399
-        ],
-        [
-            "of",
-            390
+            39
         ],
         [
             "in",
-            312
+            38
+        ],
+        [
+            "of",
+            37
         ],
         [
             "the",
-            303
+            29
         ],
         [
             "with",
-            259
+            25
         ],
         [
             "and",
-            211
+            17
         ],
         [
             "to",
-            131
-        ],
-        [
-            "is",
-            128
+            15
         ],
         [
             "man",
-            128
-        ],
-        [
-            "sitting",
-            95
+            14
         ],
         [
             "next",
-            86
+            12
+        ],
+        [
+            "is",
+            10
         ],
         [
             "standing",
-            86
-        ],
-        [
-            "two",
-            81
-        ],
-        [
-            "an",
-            79
-        ],
-        [
-            "people",
-            73
-        ],
-        [
-            "white",
-            67
-        ],
-        [
-            "woman",
-            66
-        ],
-        [
-            "top",
-            56
+            10
         ],
         [
             "holding",
-            56
+            8
+        ],
+        [
+            "people",
+            8
+        ],
+        [
+            "sitting",
+            7
+        ],
+        [
+            "his",
+            7
+        ],
+        [
+            "top",
+            6
+        ],
+        [
+            "are",
+            6
+        ],
+        [
+            "at",
+            6
+        ],
+        [
+            "an",
+            6
         ]
     ]
 }
