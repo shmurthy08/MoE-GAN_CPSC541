@@ -7,6 +7,8 @@ import numpy as np
 from t2i_moe_gan import train_aurora_gan, AuroraGenerator, AuroraDiscriminator
 
 # Import data processing utilities
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from data_processing.data_processing_pipeline import ProcessedMSCOCODataset
 
 # Constants
@@ -20,7 +22,7 @@ DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 def main():
     parser = argparse.ArgumentParser(description='Train Aurora GAN-MoE')
     
-    parser.add_argument('--data_dir', type=str, default='data_processing/processed_data',
+    parser.add_argument('--data_dir', type=str, default='../data_processing/processed_data',
                         help='Directory containing processed data')
     parser.add_argument('--batch_size', type=int, default=BATCH_SIZE,
                         help='Batch size for training')
@@ -46,8 +48,8 @@ def main():
     
     # Load datasets
     train_dataset = ProcessedMSCOCODataset(
-        os.path.join(args.data_dir, 'mscoco_train_augmented_images.npy'),
-        os.path.join(args.data_dir, 'mscoco_train_augmented_text_embeddings.npy')
+        os.path.join(args.data_dir, 'mscoco_train_images.npy'),
+        os.path.join(args.data_dir, 'mscoco_train_text_embeddings.npy')
     )
     
     val_dataset = ProcessedMSCOCODataset(

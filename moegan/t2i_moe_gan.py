@@ -268,11 +268,15 @@ class BayesianRouter(nn.Module):
         combined_sigma = torch.log(1 + torch.exp(self.combined_rho))
         
         # KL divergence for each set of weights
-        kl_feature = self._kl_normal(self.feature_mu, feature_sigma, prior_mu[:, :128], prior_sigma[:, :128])
-        kl_text = self._kl_normal(self.text_mu, text_sigma, prior_mu[:, :128], prior_sigma[:, :128])
+        kl_feature = self._kl_normal(self.feature_mu, feature_sigma, prior_mu, prior_sigma)
+        kl_text = self._kl_normal(self.text_mu, text_sigma, prior_mu, prior_sigma)
+        
+        # Create prior tensors for combined weights
+        prior_mu_combined = torch.zeros_like(self.combined_mu)
+        prior_sigma_combined = torch.ones_like(self.combined_rho)
+        
         kl_combined = self._kl_normal(self.combined_mu, combined_sigma, 
-                                      prior_mu[:128, :self.num_experts], 
-                                      prior_sigma[:128, :self.num_experts])
+                                      prior_mu_combined, prior_sigma_combined)
         
         return kl_feature + kl_text + kl_combined
     
@@ -488,19 +492,13 @@ class AuroraGenerator(nn.Module):
     """
     Aurora GAN Generator with MoE and dynamic routing.
     """
-    def __init__(self, latent_dim=LATENT_DIM, text_embedding_dim=512, 
-                 clip_model_type="ViT-B/32"):
+    def __init__(self, latent_dim=LATENT_DIM, text_embedding_dim=512):
         super(AuroraGenerator, self).__init__()
         
         self.latent_dim = latent_dim
         self.text_embedding_dim = text_embedding_dim
         
-        # Load CLIP model for text encoding
-        self.clip_model, _ = clip.load(clip_model_type, device=DEVICE)
-        for param in self.clip_model.parameters():
-            param.requires_grad = False
-        
-        # Additional learnable layers for text encoder fine-tuning
+        # Text projection (using pre-computed CLIP embeddings)
         self.text_projection = nn.Sequential(
             nn.Linear(text_embedding_dim, text_embedding_dim),
             nn.LayerNorm(text_embedding_dim),
@@ -533,28 +531,14 @@ class AuroraGenerator(nn.Module):
         self.to_rgb_32 = ModulatedConv(64, 3, kernel_size=1)
         self.to_rgb_64 = ModulatedConv(32, 3, kernel_size=1)
     
-    def encode_text(self, text):
-        # Tokenize text
-        tokens = clip.tokenize(text).to(DEVICE)
-        
-        # Extract text features using CLIP
-        with torch.no_grad():
-            text_features = self.clip_model.encode_text(tokens)
-            text_features = text_features.float()
-        
-        # Get global text feature (for w)
-        text_global = text_features
-        
-        # Process text sequence for attention layers
-        text_seq = self.text_projection(text_features).unsqueeze(1)  # [B, 1, D]
-        
-        return text_global, text_seq
-    
-    def forward(self, z, text, truncation_psi=0.7, return_routing=False):
+    def forward(self, z, text_embeddings, truncation_psi=0.7, return_routing=False):
         batch_size = z.size(0)
         
-        # Encode text
-        text_global, text_seq = self.encode_text(text)
+        # Process text embeddings directly (no CLIP encoding needed)
+        text_global = text_embeddings  # Use embeddings directly
+        
+        # Process text sequence for attention layers
+        text_seq = self.text_projection(text_embeddings).unsqueeze(1)  # [B, 1, D]
         
         # Concatenate z and text global feature
         z_text = torch.cat([z, text_global], dim=1)
@@ -610,7 +594,6 @@ class AuroraGenerator(nn.Module):
         if return_routing:
             return x_64, kl_loss, routing_probs
         return x_64, kl_loss
-
 class AuroraDiscriminator(nn.Module):
     """
     Discriminator for Aurora GAN with text conditioning.
@@ -717,6 +700,8 @@ class AuroraGANLoss:
         
         return balance_weight * balance_loss
 
+from tqdm import tqdm
+
 def train_aurora_gan(
     dataloader, val_dataloader=None, 
     num_epochs=50, lr=0.0002, beta1=0.5, beta2=0.999,
@@ -743,7 +728,18 @@ def train_aurora_gan(
     # Training loop
     step = 0
     for epoch in range(num_epochs):
-        for batch_idx, (real_images, text_embeddings) in enumerate(dataloader):
+        print(f"Starting epoch {epoch+1}/{num_epochs}")
+        
+        # Initialize progress bar for this epoch
+        epoch_pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{num_epochs}")
+        
+        # Track running loss values for the progress bar
+        running_d_loss = 0.0
+        running_g_loss = 0.0
+        running_kl_loss = 0.0
+        running_balance_loss = 0.0
+        
+        for batch_idx, (real_images, text_embeddings) in enumerate(epoch_pbar):
             batch_size = real_images.size(0)
             
             # Move data to device
@@ -793,9 +789,23 @@ def train_aurora_gan(
             g_loss.backward()
             optimizer_g.step()
             
+            # Update running losses for progress bar
+            running_d_loss = 0.9 * running_d_loss + 0.1 * d_loss.item()
+            running_g_loss = 0.9 * running_g_loss + 0.1 * g_loss.item()
+            running_kl_loss = 0.9 * running_kl_loss + 0.1 * kl_loss.item()
+            running_balance_loss = 0.9 * running_balance_loss + 0.1 * balance_loss.item()
+            
+            # Update progress bar description with loss values
+            epoch_pbar.set_postfix({
+                'D_loss': f'{running_d_loss:.4f}',
+                'G_loss': f'{running_g_loss:.4f}',
+                'KL': f'{running_kl_loss:.4f}',
+                'Balance': f'{running_balance_loss:.4f}'
+            })
+            
             # Logging
             if step % log_interval == 0:
-                print(f"Epoch [{epoch}/{num_epochs}] Batch [{batch_idx}/{len(dataloader)}] "
+                print(f"Batch [{batch_idx}/{len(dataloader)}] "
                       f"D_loss: {d_loss.item():.4f}, G_loss: {g_loss.item():.4f}, "
                       f"KL_loss: {kl_loss.item():.4f}, Balance_loss: {balance_loss.item():.4f}")
             
@@ -812,6 +822,9 @@ def train_aurora_gan(
             
             step += 1
         
+        # Close the progress bar for this epoch
+        epoch_pbar.close()
+        
         # Validation (if provided)
         if val_dataloader is not None:
             generator.eval()
@@ -820,8 +833,11 @@ def train_aurora_gan(
             val_g_loss = 0
             val_d_loss = 0
             
+            print("Running validation...")
+            val_pbar = tqdm(val_dataloader, desc=f"Validation Epoch {epoch+1}")
+            
             with torch.no_grad():
-                for val_real_images, val_text_embeddings in val_dataloader:
+                for val_real_images, val_text_embeddings in val_pbar:
                     val_batch_size = val_real_images.size(0)
                     
                     # Move data to device
@@ -841,19 +857,40 @@ def train_aurora_gan(
                     val_fake_pred = discriminator(val_fake_images, val_text_embeddings)
                     
                     # Losses
-                    val_d_loss += gan_loss.discriminator_loss(val_real_pred, val_fake_pred).item()
-                    val_g_loss += gan_loss.generator_loss(val_fake_pred, val_kl_loss).item()
+                    batch_d_loss = gan_loss.discriminator_loss(val_real_pred, val_fake_pred).item()
+                    batch_g_loss = gan_loss.generator_loss(val_fake_pred, val_kl_loss).item()
+                    
+                    val_d_loss += batch_d_loss
+                    val_g_loss += batch_g_loss
+                    
+                    # Update progress bar
+                    val_pbar.set_postfix({
+                        'D_loss': f'{batch_d_loss:.4f}',
+                        'G_loss': f'{batch_g_loss:.4f}'
+                    })
+            
+            # Close validation progress bar
+            val_pbar.close()
             
             # Average losses
             val_d_loss /= len(val_dataloader)
             val_g_loss /= len(val_dataloader)
             
-            print(f"Validation Epoch [{epoch}/{num_epochs}] "
-                  f"D_loss: {val_d_loss:.4f}, G_loss: {val_g_loss:.4f}")
+            print(f"Validation Results - D_loss: {val_d_loss:.4f}, G_loss: {val_g_loss:.4f}")
             
             # Set models back to training mode
             generator.train()
             discriminator.train()
+        
+        # Save model after each epoch
+        torch.save({
+            'generator': generator.state_dict(),
+            'discriminator': discriminator.state_dict(),
+            'optimizer_g': optimizer_g.state_dict(),
+            'optimizer_d': optimizer_d.state_dict(),
+            'epoch': epoch,
+            'step': step
+        }, os.path.join(save_dir, f"aurora_checkpoint_epoch_{epoch}.pt"))
     
     # Save final models
     torch.save({
