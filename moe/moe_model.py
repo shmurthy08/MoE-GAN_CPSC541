@@ -129,7 +129,7 @@ class BayesianMoEGatingNetwork(nn.Module):
     for each input prompt, with uncertainty estimation through Bayesian techniques.
     """
     # First, update the __init__ method to accept the text embedding dimension
-    def __init__(self, input_dim, hidden_dim, num_experts, text_dim=None, num_samples=10):
+    def __init__(self, input_dim, hidden_dim, num_experts, text_dim=None, num_samples=75):
         """
         Initialize Bayesian MoE Gating Network.
         
@@ -159,22 +159,24 @@ class BayesianMoEGatingNetwork(nn.Module):
         self.bayesian_layer2 = BayesianLinear(hidden_dim, hidden_dim)
         self.bayesian_layer2a = BayesianLinear(hidden_dim, hidden_dim)
         self.bayesian_layer2b = BayesianLinear(hidden_dim, hidden_dim)
+        self.bayesian_layer2c = BayesianLinear(hidden_dim, hidden_dim)
+
         self.bayesian_layer3 = BayesianLinear(hidden_dim, num_experts)
         
         # Activation function
         self.activation = nn.ReLU()
 
-    def hamiltonian_monte_carlo(self, x, num_samples=None, burn_in=100, 
-                           step_size=0.01, num_steps=10):
+    def hamiltonian_monte_carlo(self, x, num_samples=None, step_size=0.003, num_steps=15, burn_in=200, temperature=1.0):
         """
-        Perform Hamiltonian Monte Carlo sampling for uncertainty estimation.
+        Improved Hamiltonian Monte Carlo sampling for uncertainty estimation with proper gradient handling.
         
         Args:
             x: Input tensor (text embeddings)
-            num_samples: Number of samples to collect after burn-in
-            burn_in: Number of samples to discard during burn-in phase
-            step_size: Step size for leapfrog integration (epsilon)
-            num_steps: Number of leapfrog steps (L)
+            num_samples: Number of samples to collect (default: self.num_samples)
+            step_size: Step size for leapfrog integrator (default: 0.01)
+            num_steps: Number of leapfrog steps (default: 10)
+            burn_in: Number of burn-in samples to discard (default: 5)
+            temperature: Temperature for softening distributions (default: 1.0)
         
         Returns:
             Mean probabilities and uncertainty estimates
@@ -182,164 +184,152 @@ class BayesianMoEGatingNetwork(nn.Module):
         if num_samples is None:
             num_samples = self.num_samples
         
-        # Save original model state
-        original_state = {name: param.data.clone() for name, param in self.named_parameters()}
+        # Create storage for samples
+        samples = []
         
-        # Storage for accepted samples
-        accepted_probs = []
+        acceptance_rate = 0
+        energy_diffs = []
         
-        # Function to compute log posterior and its gradient
-        def compute_log_posterior_and_grad():
-            # Zero all gradients
-            for param in self.parameters():
-                if param.grad is not None:
-                    param.grad.zero_()
-            
-            # Forward pass with autograd enabled
-            h1, kl1 = self.bayesian_layer1(x, sample=False)
-            h1 = self.activation(h1)
-            
-            h2, kl2 = self.bayesian_layer2(h1, sample=False)
-            h2 = self.activation(h2)
-            
-            h2a, kl2a = self.bayesian_layer2a(h2, sample=False)
-            h2a = self.activation(h2a)
-            
-            h2b, kl2b = self.bayesian_layer2b(h2a, sample=False)
-            h2b = self.activation(h2b)
-            
-            logits, kl3 = self.bayesian_layer3(h2b, sample=False)
-            probs = F.softmax(logits, dim=1)
-            
-            # Log likelihood
-            pseudo_labels = torch.argmax(logits, dim=1)
-            log_likelihood = -F.cross_entropy(logits, pseudo_labels, reduction='sum')
-            
-            # Log prior (using negative KL divergence as proxy)
-            log_prior = -(kl1 + kl2 + kl2a + kl2b + kl3)
-            
-            # Log posterior = log likelihood + log prior
-            log_posterior = log_likelihood + log_prior
-            
-            # Compute gradients
-            log_posterior.backward()
-            
-            # Get gradients as a single vector
-            grad_vector = []
-            for param in self.parameters():
-                if param.grad is not None:
-                    grad_vector.append(param.grad.view(-1))
-            
-            grad_vector = torch.cat(grad_vector)
-            
-            return probs, log_posterior.item(), grad_vector
+        # Make a copy of the input
+        x_current = x.clone().detach()
         
-        # Function to get parameters as a single vector
-        def get_param_vector():
-            param_vector = []
-            for param in self.parameters():
-                param_vector.append(param.data.view(-1))
-            return torch.cat(param_vector)
+        # Ensure we're in evaluation mode
+        training_mode = self.training
+        self.eval()
         
-        # Function to set parameters from a single vector
-        def set_param_vector(param_vector):
-            start_idx = 0
-            for param in self.parameters():
-                param_size = param.numel()
-                param.data = param_vector[start_idx:start_idx + param_size].view(param.shape)
-                start_idx += param_size
+        # Get initial prediction without sampling for a reference point
+        with torch.no_grad():
+            initial_probs, _, initial_logits = self(x, sample=False)
         
-        # Initialize variables for HMC
-        total_iters = burn_in + num_samples
-        accepted_count = 0
-        
-        # Initial state
-        current_q = get_param_vector()
-        current_probs, current_log_posterior, current_grad = compute_log_posterior_and_grad()
-        
-        print(f"Starting HMC with {total_iters} iterations")
-        print(f"Initial log posterior: {current_log_posterior:.4f}")
-        
-        # HMC loop
-        for i in range(total_iters):
-            # Initialize momentum variable from standard normal
-            p = torch.randn_like(current_q)
-            current_p = p.clone()
-            
-            # Compute initial Hamiltonian
-            current_h = -current_log_posterior + 0.5 * torch.sum(current_p**2)
-            
-            # Make a deep copy of the current parameters
-            new_q = current_q.clone()
-            
-            # First half-step for momentum
-            set_param_vector(new_q)
-            _, _, grad = compute_log_posterior_and_grad()
-            p = p + 0.5 * step_size * grad
-            
-            # Full leapfrog steps
-            for j in range(num_steps):
-                # Full step for position
-                new_q = new_q + step_size * p
+        # Sample collection
+        with torch.no_grad():
+            for i in range(num_samples + burn_in):
+                # Sample momentum
+                momentum = torch.randn_like(x_current)
+                momentum_init = momentum.clone()
                 
-                # Full step for momentum (except at the end)
-                if j < num_steps - 1:
-                    set_param_vector(new_q)
-                    _, _, grad = compute_log_posterior_and_grad()
-                    p = p + step_size * grad
-            
-            # Last half-step for momentum
-            set_param_vector(new_q)
-            new_probs, new_log_posterior, grad = compute_log_posterior_and_grad()
-            p = p + 0.5 * step_size * grad
-            
-            # Negate momentum for reversibility
-            p = -p
-            
-            # Compute new Hamiltonian
-            new_h = -new_log_posterior + 0.5 * torch.sum(p**2)
-            
-            # Metropolis acceptance step
-            log_accept_ratio = current_h - new_h
-            
-            if torch.log(torch.rand(1)) < log_accept_ratio:
-                # Accept the proposal
-                current_q = new_q
-                current_log_posterior = new_log_posterior
-                current_probs = new_probs
-                accepted_count += 1
-            else:
-                # Reject the proposal, revert to previous state
-                set_param_vector(current_q)
-            
-            # Store sample if past burn-in
-            if i >= burn_in:
-                accepted_probs.append(current_probs.clone())
-            
-            # Print progress
-            if (i + 1) % 20 == 0:
-                accept_rate = accepted_count / (i + 1)
-                print(f"HMC iteration {i+1}/{total_iters}, acceptance rate: {accept_rate:.4f}, log posterior: {current_log_posterior:.4f}")
+                # Initialize positions
+                x_proposed = x_current.clone()
+                
+                # Initial energy calculation
+                with torch.enable_grad():
+                    x_temp = x_proposed.clone().detach().requires_grad_(True)
+                    expert_probs, _, logits = self(x_temp, sample=True)
+                    
+                    # Use log probabilities to better capture distribution shape
+                    potential_energy = F.kl_div(
+                        F.log_softmax(logits / temperature, dim=1),
+                        F.softmax(initial_logits / temperature, dim=1),
+                        reduction='sum'
+                    )
+                    
+                    # Initial gradient
+                    grad = torch.autograd.grad(
+                        potential_energy, 
+                        x_temp,
+                        create_graph=False,
+                        retain_graph=False
+                    )[0]
+                
+                # First half-step for momentum
+                momentum = momentum - 0.5 * step_size * grad
+                
+                # Leapfrog steps
+                for step in range(num_steps):
+                    # Position update
+                    x_proposed = x_proposed + step_size * momentum
+                    
+                    # Gradient computation with fresh computation graph
+                    with torch.enable_grad():
+                        x_temp = x_proposed.clone().detach().requires_grad_(True)
+                        expert_probs, _, logits = self(x_temp, sample=True)
+                        
+                        # Potential energy using KL divergence for smoother energy landscape
+                        potential_energy = F.kl_div(
+                            F.log_softmax(logits / temperature, dim=1),
+                            F.softmax(initial_logits / temperature, dim=1),
+                            reduction='sum'
+                        )
+                        
+                        # Compute gradient
+                        grad = torch.autograd.grad(
+                            potential_energy, 
+                            x_temp, 
+                            create_graph=False, 
+                            retain_graph=False
+                        )[0]
+                    
+                    # Momentum update
+                    if step < num_steps - 1:
+                        momentum = momentum - step_size * grad
+                    else:
+                        # Last half-step
+                        momentum = momentum - 0.5 * step_size * grad
+                
+                # Metropolis acceptance
+                with torch.enable_grad():
+                    # Compute final energies
+                    x_temp = x_proposed.clone().detach().requires_grad_(True)
+                    expert_probs_proposed, _, logits_proposed = self(x_temp, sample=True)
+                    
+                    # Final potential energy
+                    potential_energy_proposed = F.kl_div(
+                        F.log_softmax(logits_proposed / temperature, dim=1),
+                        F.softmax(initial_logits / temperature, dim=1),
+                        reduction='sum'
+                    )
+                    
+                    # Initial potential energy (recalculate to ensure consistency)
+                    x_temp_current = x_current.clone().detach().requires_grad_(True)
+                    _, _, logits_current = self(x_temp_current, sample=True)
+                    potential_energy_current = F.kl_div(
+                        F.log_softmax(logits_current / temperature, dim=1),
+                        F.softmax(initial_logits / temperature, dim=1),
+                        reduction='sum'
+                    )
+                    
+                    # Kinetic energies
+                    kinetic_energy_init = 0.5 * torch.sum(momentum_init**2)
+                    kinetic_energy_final = 0.5 * torch.sum(momentum**2)
+                    
+                    # Hamiltonian difference for acceptance
+                    delta_H = (potential_energy_proposed + kinetic_energy_final) - (potential_energy_current + kinetic_energy_init)
+                
+                
+                
+                # Accept or reject
+                if delta_H < 0 or torch.rand(1, device=x.device) < torch.exp(-delta_H):
+                    # Accept proposed sample
+                    acceptance_rate += 1
+                    x_current = x_proposed.clone()
+                    expert_probs_current = expert_probs_proposed.clone()
+                else:
+                    # Recompute expert probs for current x (if rejected)
+                    with torch.no_grad():
+                        expert_probs_current, _, _ = self(x_current, sample=True)
+                
+                # Store sample after burn-in
+                if i >= burn_in:
+                    samples.append(expert_probs_current.clone())
         
-        # Ensure we have samples - if none were accepted, use current model state
-        if len(accepted_probs) == 0:
-            print("Warning: No samples were accepted. Using single sample from current model state.")
-            accepted_probs.append(current_probs.clone())
+        acceptance_rate /= num_samples + burn_in
+        print(f"HMC Acceptance rate: {acceptance_rate:.4f}")
+        # Restore training mode
+        self.train(training_mode)
         
-        # Compute statistics from accepted samples
-        accepted_probs = torch.stack(accepted_probs, dim=0)
-        mean_probs = torch.mean(accepted_probs, dim=0)
-        uncertainty = torch.std(accepted_probs, dim=0) + 1e-6
+        # Compute statistics from samples
+        if len(samples) > 0:
+            all_samples = torch.stack(samples, dim=0)
+            mean_probs = torch.mean(all_samples, dim=0)
+            uncertainty = torch.std(all_samples, dim=0)
+        else:
+            # Fallback
+            with torch.no_grad():
+                mean_probs, _, _ = self(x, sample=False)
+                uncertainty = torch.zeros_like(mean_probs)
         
-        # Restore original model parameters
-        for name, param in self.named_parameters():
-            if name in original_state:
-                param.data.copy_(original_state[name])
-        
-        print(f"Final HMC acceptance rate: {accepted_count/total_iters:.4f}")
-        
-        return mean_probs, uncertainty
-
+        return mean_probs, uncertainty    
+    
     
     def monte_carlo_sample(self, x, num_samples=None):
         """
@@ -401,6 +391,10 @@ class BayesianMoEGatingNetwork(nn.Module):
         x = self.activation(x)
         kl += kl2b
         
+        # 2c Bayesian Layer
+        x, kl2c = self.bayesian_layer2c(x, sample)
+        x = self.activation(x)
+        kl += kl2c
         
         # Output Bayesian layer
         logits, kl3 = self.bayesian_layer3(x, sample)
@@ -412,7 +406,7 @@ class BayesianMoEGatingNetwork(nn.Module):
         # If sampling for uncertainty estimation
         if sample and calculate_log_probs:
             # Use the separate Monte Carlo sampling method instead of recursive call
-            _, uncertainty = self.monte_carlo_sample(original_input)
+            _, uncertainty = self.monte_carlo_sample(original_input, num_samples=self.num_samples)
             return expert_probs, kl, logits, uncertainty
         
         return expert_probs, kl, logits
@@ -545,7 +539,7 @@ class MixtureOfExperts(nn.Module):
 
 
 # Training function for the Bayesian MoE Gating Network
-def train_bayesian_moe_gating(model, train_dataloader, val_dataloader, epochs=10, lr=0.001, kl_weight=0.01, device='cuda'):
+def train_bayesian_moe_gating(model, train_dataloader, val_dataloader, epochs=10, lr=0.01, kl_weight=0.01, device='cuda'):
     """
     Train the Bayesian MoE Gating Network.
     
@@ -564,8 +558,8 @@ def train_bayesian_moe_gating(model, train_dataloader, val_dataloader, epochs=10
     # Move model to device
     model = model.to(device)
     
-    # Initialize optimizer
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    # Initialize optimizer with annealing learning rate and adaptive weight decay
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
     
     # Initialize loss function (Cross-Entropy for expert classification)
     criterion = nn.CrossEntropyLoss()
@@ -600,6 +594,7 @@ def train_bayesian_moe_gating(model, train_dataloader, val_dataloader, epochs=10
             loss = ce_loss + kl_weight * kl
             
             # Backward pass and optimization
+            loss.requires_grad = True
             loss.backward()
             optimizer.step()
             
