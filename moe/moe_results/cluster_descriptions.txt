@@ -1,8 +1,9 @@
-Cluster 0: Expert for kitchen, computer, vehicle
-Cluster 1: Expert for meal, food, dining
-Cluster 2: Expert for street, vehicle, train
-Cluster 3: Expert for vehicle, beach, landscape
-Cluster 4: Expert for sports, exercise, building
-Cluster 5: Expert for vehicle, dog, building
-Cluster 6: Expert for landscape, wildlife, mountains
-Cluster 7: Expert for people, feeling, concept
+Cluster 0: Expert for street, vehicle, train
+Cluster 1: Expert for sports, exercise, building
+Cluster 2: Expert for people, feeling, concept
+Cluster 3: Expert for building, landscape, crowd
+Cluster 4: Expert for landscape, wildlife, mountains
+Cluster 5: Expert for cat, dog, vehicle
+Cluster 6: Expert for vehicle, beach, landscape
+Cluster 7: Expert for kitchen, computer, vehicle
+Cluster 8: Expert for meal, food, dining

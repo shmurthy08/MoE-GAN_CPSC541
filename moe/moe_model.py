@@ -166,7 +166,7 @@ class BayesianMoEGatingNetwork(nn.Module):
         # Activation function
         self.activation = nn.ReLU()
 
-    def hamiltonian_monte_carlo(self, x, num_samples=None, step_size=0.003, num_steps=15, burn_in=200, temperature=1.0):
+    def hamiltonian_monte_carlo(self, x, num_samples=None, step_size=0.003, num_steps=15, burn_in=200, temperature=1.3):
         """
         Improved Hamiltonian Monte Carlo sampling for uncertainty estimation with proper gradient handling.
         

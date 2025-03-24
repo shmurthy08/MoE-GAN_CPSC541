@@ -240,7 +240,7 @@ def train_moe_with_clusters(train_dataset, val_dataset, epochs=10, lr=0.001, kl_
     model = model.to(DEVICE)
     
     # Initialize optimizer
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
     
     # Initialize loss function (Cross-Entropy for expert classification)
     criterion = torch.nn.CrossEntropyLoss()
