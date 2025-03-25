@@ -40,6 +40,8 @@ def main():
                         help='Logging interval')
     parser.add_argument('--save_interval', type=int, default=1000,
                         help='Checkpoint saving interval')
+    parser.add_argument('--clip_weight', type=float, default=0.1,
+                   help='Weight for CLIP perceptual loss')
     
     args = parser.parse_args()
     
@@ -49,12 +51,12 @@ def main():
     # Load datasets
     train_dataset = ProcessedMSCOCODataset(
         os.path.join(args.data_dir, 'mscoco_train_images.npy'),
-        os.path.join(args.data_dir, 'mscoco_train_text_captions.npy')
+        os.path.join(args.data_dir, 'mscoco_train_text_embeddings.npy')
     )
     
     val_dataset = ProcessedMSCOCODataset(
         os.path.join(args.data_dir, 'mscoco_validation_images.npy'),
-        os.path.join(args.data_dir, 'mscoco_validation_text_captions.npy')
+        os.path.join(args.data_dir, 'mscoco_validation_text_embeddings.npy')
     )
     
     # Create dataloaders

@@ -35,7 +35,7 @@ def get_clip_model():
     global _clip_preprocess
     
     if _clip_model is None:
-        logger.info(f"Loading CLIP model {CLIP_MODEL_TYPE}")
+        logger.info(f"\nLoading CLIP model {CLIP_MODEL_TYPE}")
         _clip_model, _clip_preprocess = clip.load(CLIP_MODEL_TYPE, device=DEVICE)
         _clip_model.eval()
     
@@ -762,14 +762,20 @@ class AuroraGANLoss:
     """
     def __init__(self, device=DEVICE):
         self.device = device
+        self.clip_loss = CLIPLoss(device)
     
-    def generator_loss(self, fake_pred, kl_loss=None, kl_weight=0.001):
+    def generator_loss(self, fake_pred, kl_loss=None, kl_weight=0.001,
+                       clip_loss=None, clip_weight=0.01):
         # Non-saturating GAN loss
         g_loss = F.softplus(-fake_pred).mean()
         
         # Add KL divergence loss if provided
         if kl_loss is not None:
             g_loss = g_loss + kl_weight * kl_loss
+            
+        # Add Clip loss
+        if clip_loss is not None:
+            g_loss = g_loss + clip_loss * clip_weight
         
         return g_loss
     
@@ -821,7 +827,8 @@ def train_aurora_gan(
     dataloader, val_dataloader=None, 
     num_epochs=50, lr=0.0002, beta1=0.5, beta2=0.999,
     device=DEVICE, save_dir='./aurora_checkpoints',
-    log_interval=10, save_interval=1000
+    log_interval=10, save_interval=1000, clip_weight = 0.1, kl_weight = 0.001
+
 ):
     """
     Train the Aurora GAN model.
@@ -853,6 +860,7 @@ def train_aurora_gan(
         running_g_loss = 0.0
         running_kl_loss = 0.0
         running_balance_loss = 0.0
+        running_clip_loss = 0.0
         
         for batch_idx, (real_images, text_embeddings) in enumerate(epoch_pbar):
             batch_size = real_images.size(0)
@@ -897,9 +905,10 @@ def train_aurora_gan(
             
             # Calculate load balancing loss
             balance_loss = gan_loss.moe_balance_loss(routing_probs[-1])
-            
+            clip_loss = gan_loss.compute_clip_loss(fake_images, text_embeddings)
             # Generator loss
-            g_loss = gan_loss.generator_loss(fake_pred, kl_loss, kl_weight=0.001)
+            g_loss = gan_loss.generator_loss(fake_pred, kl_loss, kl_weight=kl_weight,
+                                             clip_loss=clip_loss, clip_weight=clip_weight)
             g_loss = g_loss + balance_loss
             g_loss.backward()
             optimizer_g.step()
@@ -909,18 +918,20 @@ def train_aurora_gan(
             running_g_loss = 0.9 * running_g_loss + 0.1 * g_loss.item()
             running_kl_loss = 0.9 * running_kl_loss + 0.1 * kl_loss.item()
             running_balance_loss = 0.9 * running_balance_loss + 0.1 * balance_loss.item()
+            running_clip_loss = 0.9 * running_clip_loss + 0.1 * clip_loss.item()
             
             # Update progress bar description with loss values
             epoch_pbar.set_postfix({
                 'D_loss': f'{running_d_loss:.4f}',
                 'G_loss': f'{running_g_loss:.4f}',
                 'KL': f'{running_kl_loss:.4f}',
-                'Balance': f'{running_balance_loss:.4f}'
+                'Balance': f'{running_balance_loss:.4f}',
+                'Clip': f'{running_clip_loss:.4f}'
             })
             
             # Logging
             if step % log_interval == 0:
-                print(f"Batch [{batch_idx}/{len(dataloader)}] "
+                logger.info(f"\nBatch [{batch_idx}/{len(dataloader)}] "
                       f"D_loss: {d_loss.item():.4f}, G_loss: {g_loss.item():.4f}, "
                       f"KL_loss: {kl_loss.item():.4f}, Balance_loss: {balance_loss.item():.4f}")
             
