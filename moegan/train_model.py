@@ -49,12 +49,12 @@ def main():
     # Load datasets
     train_dataset = ProcessedMSCOCODataset(
         os.path.join(args.data_dir, 'mscoco_train_images.npy'),
-        os.path.join(args.data_dir, 'mscoco_train_text_embeddings.npy')
+        os.path.join(args.data_dir, 'mscoco_train_text_captions.npy')
     )
     
     val_dataset = ProcessedMSCOCODataset(
         os.path.join(args.data_dir, 'mscoco_validation_images.npy'),
-        os.path.join(args.data_dir, 'mscoco_validation_text_embeddings.npy')
+        os.path.join(args.data_dir, 'mscoco_validation_text_captions.npy')
     )
     
     # Create dataloaders

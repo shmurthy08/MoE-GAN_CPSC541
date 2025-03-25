@@ -3,10 +3,12 @@ import os
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.init 
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 import clip
 import math
+import logging
 from torch.distributions import Normal, kl_divergence
 
 # Constants
@@ -14,6 +16,88 @@ LATENT_DIM = 512
 TEXT_EMBEDDING_DIM = 512
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 NUM_EXPERTS = 8  # Number of experts in MoE layers
+CLIP_MODEL_TYPE = "ViT-B/32"  # Vision Transformer model
+
+_clip_model = None
+_clip_preprocess = None
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+def get_clip_model():
+    """
+    Lazy loading of CLIP model.
+    
+    Returns:
+       clip model and preprocess
+    """
+    global _clip_model
+    global _clip_preprocess
+    
+    if _clip_model is None:
+        logger.info(f"Loading CLIP model {CLIP_MODEL_TYPE}")
+        _clip_model, _clip_preprocess = clip.load(CLIP_MODEL_TYPE, device=DEVICE)
+        _clip_model.eval()
+    
+    return _clip_model, _clip_preprocess
+
+def encode_text_with_clip(text):
+    """
+    Encode using CLIP model. Accepts single string or list.
+    
+    Args:
+        text: text string or list of strings
+    Returns:
+        text embeddings
+    """
+    model , _ = get_clip_model()
+    if isinstance(text, str):
+        text = [text]
+    with torch.no_grad():
+        text_tokens = clip.tokenize(text).to(model.device)
+        text_embeddings = model.encode_text(text_tokens)
+    return text_embeddings
+
+class CLIPLoss(nn.Module):
+    """
+    CLIP-based perceptual loss for text-to-image alignment
+    """
+    def __init__(self, device=DEVICE):
+        super(CLIPLoss, self).__init__()
+        self.model, self.preprocess = get_clip_model()
+        self.device = device
+        
+    def forward(self, images, text_embeddings):
+        """
+        Calculate CLIP loss between generated images and text embeddings
+        
+        Args:
+            images: Tensor of generated images [batch_size, 3, height, width]
+            text_embeddings: Tensor of text embeddings from CLIP [batch_size, embedding_dim]
+            
+        Returns:
+            loss: CLIP-based loss value
+        """
+        # Ensure images are in the correct range for CLIP [-1, 1]
+        normed_images = torch.clamp(images, -1, 1)
+        
+        # Resize images to match CLIP's expected input size (224x224)
+        if normed_images.shape[-1] != 224 or normed_images.shape[-2] != 224:
+            normed_images = F.interpolate(normed_images, size=(224, 224), mode='bilinear', align_corners=False)
+        
+        # Extract image features using CLIP
+        with torch.no_grad():
+            image_features = self.model.encode_image(normed_images).float()
+            image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+            
+            # Ensure text embeddings are normalized
+            text_features = text_embeddings / text_embeddings.norm(dim=-1, keepdim=True)
+        
+        # Cosine similarity as the loss (higher similarity = lower loss)
+        similarity = torch.sum(image_features * text_features, dim=1)
+        loss = 1.0 - similarity.mean()
+        
+        return loss
 
 class ModulatedConv(nn.Module):
     """
@@ -58,32 +142,26 @@ class ModulatedConv(nn.Module):
         
         # Demodulate weights if required
         if self.demodulate:
-            d = torch.rsqrt(
-                (weight ** 2).sum(dim=(2, 3, 4), keepdim=True) + 1e-8
-            )
+            d = torch.rsqrt((weight ** 2).sum(dim=(2, 3, 4), keepdim=True) + 1e-8)
             weight = weight * d
         
-        # Reshape for batch matrix multiplication
-        weight = weight.view(
-            batch_size * self.out_channels, in_channels, 
-            self.kernel_size, self.kernel_size
-        )
+        # Reshape for efficient batch matrix multiplication
+        weight = weight.view(batch_size * self.out_channels, in_channels, 
+                            self.kernel_size, self.kernel_size)
         
-        # Reshape input
-        x = x.reshape(1, batch_size * in_channels, height, width)
+        # Reshape input for grouped convolution
+        x = x.view(1, batch_size * in_channels, height, width)
         
         # Perform convolution
         if self.upsample:
-            # Upsample then convolve
             x = F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False)
             x = F.conv2d(x, weight, padding=self.padding, stride=self.stride, groups=batch_size)
         else:
-            # Regular convolution
             x = F.conv2d(x, weight, padding=self.padding, stride=self.stride, groups=batch_size)
         
-        # Reshape output
-        _, _, height, width = x.shape
-        x = x.view(batch_size, self.out_channels, height, width)
+        # Reshape output back to batch form
+        _, _, new_height, new_width = x.shape
+        x = x.view(batch_size, self.out_channels, new_height, new_width)
         
         return x
 
@@ -177,8 +255,9 @@ class BayesianRouter(nn.Module):
         self.num_experts = num_experts
         
         # Feature projection
-        self.feature_mu = nn.Parameter(torch.Tensor(feature_dim, 128).normal_(0, 0.1))
-        self.feature_rho = nn.Parameter(torch.Tensor(feature_dim, 128).normal_(-3, 0.1))
+        self.feature_mu = nn.Parameter(torch.Tensor(feature_dim, 128))
+        nn.init.kaiming_normal_(self.feature_mu, mode='fan_in', nonlinearity='leaky_relu')
+        self.feature_rho = nn.Parameter(torch.Tensor(feature_dim, 128).fill_(-3))
         
         # Text projection
         self.text_mu = nn.Parameter(torch.Tensor(text_dim, 128).normal_(0, 0.1))
@@ -256,43 +335,39 @@ class BayesianRouter(nn.Module):
     
     def kl_divergence(self):
         """
-        Calculate KL divergence for Bayesian weights.
+        Calculate KL divergence between posterior and prior distributions.
+        Fixed to handle different tensor dimensions properly.
         """
-        # Prior distribution (standard normal)
-        prior_mu = torch.zeros_like(self.feature_mu)
-        prior_sigma = torch.ones_like(self.feature_rho)
+        kl_div = 0.0
         
-        # Posterior distributions
-        feature_sigma = torch.log(1 + torch.exp(self.feature_rho))
-        text_sigma = torch.log(1 + torch.exp(self.text_rho))
-        combined_sigma = torch.log(1 + torch.exp(self.combined_rho))
+        # Prior: standard normal distribution
+        prior_mean = 0.0
+        prior_var = 1.0
         
-        # KL divergence for each set of weights
-        kl_feature = self._kl_normal(self.feature_mu, feature_sigma, prior_mu, prior_sigma)
-        kl_text = self._kl_normal(self.text_mu, text_sigma, prior_mu, prior_sigma)
-        
-        # Create prior tensors for combined weights
-        prior_mu_combined = torch.zeros_like(self.combined_mu)
-        prior_sigma_combined = torch.ones_like(self.combined_rho)
-        
-        kl_combined = self._kl_normal(self.combined_mu, combined_sigma, 
-                                      prior_mu_combined, prior_sigma_combined)
-        
-        return kl_feature + kl_text + kl_combined
-    
-    def _kl_normal(self, mu_q, sigma_q, mu_p, sigma_p):
-        """
-        KL divergence between two normal distributions.
-        """
-        var_q = sigma_q ** 2
-        var_p = sigma_p ** 2
-        
-        kl = 0.5 * torch.sum(
-            torch.log(var_p / var_q) + (var_q + (mu_q - mu_p) ** 2) / var_p - 1
+        # Calculate KL for feature weights
+        posterior_var_f = torch.log(1 + torch.exp(self.feature_rho)) ** 2
+        kl_div += 0.5 * torch.sum(
+            torch.log(prior_var / posterior_var_f) +
+            (posterior_var_f + self.feature_mu ** 2) / prior_var - 1
         )
         
-        return kl
-
+        # Calculate KL for text weights
+        posterior_var_t = torch.log(1 + torch.exp(self.text_rho)) ** 2
+        kl_div += 0.5 * torch.sum(
+            torch.log(prior_var / posterior_var_t) +
+            (posterior_var_t + self.text_mu ** 2) / prior_var - 1
+        )
+        
+        # Calculate KL for combined weights
+        posterior_var_c = torch.log(1 + torch.exp(self.combined_rho)) ** 2
+        kl_div += 0.5 * torch.sum(
+            torch.log(prior_var / posterior_var_c) +
+            (posterior_var_c + self.combined_mu ** 2) / prior_var - 1
+        )
+        
+        return kl_div
+    
+    
 class SparseMoE(nn.Module):
     """
     Sparse Mixture of Experts layer with a Bayesian router.
@@ -312,14 +387,11 @@ class SparseMoE(nn.Module):
         self.router = BayesianRouter(dim, text_dim, num_experts)
     
     def forward(self, x, w):
+            
         batch_size, channels, height, width = x.shape
         
-        # Reshape input for experts
-        x_reshaped = x.permute(0, 2, 3, 1).reshape(batch_size * height * width, channels)
-        
-        # Expand w to match feature points
-        w_expanded = w.unsqueeze(1).unsqueeze(1).repeat(1, height, width, 1)
-        w_reshaped = w_expanded.reshape(batch_size * height * width, -1)
+        x_reshaped = x.permute(0, 2, 3, 1).contiguous().view(-1, channels)
+        w_reshaped = w.unsqueeze(1).unsqueeze(1).expand(batch_size, height, width, -1).contiguous().view(-1, w.size(1))
         
         # Get routing probabilities
         routing_probs, routing_logits = self.router(x_reshaped, w_reshaped)
@@ -352,15 +424,15 @@ class SparseMoE(nn.Module):
         output = combined_output.reshape(batch_size, height, width, channels).permute(0, 3, 1, 2)
         
         # Calculate KL divergence
-        kl_div = self.router.kl_divergence() if self.training else 0.0
+        kl_div = self.router.kl_divergence() if self.training else torch.tensor(0.0, device=x.device)
         
         return output, kl_div, routing_probs
-
+    
 class AttentionBlock(nn.Module):
     """
     Attention Block with self-attention, cross-attention, and FFN (MoE).
     """
-    def __init__(self, dim, text_dim=768, heads=8):
+    def __init__(self, dim, text_dim=512, heads=8):
         super(AttentionBlock, self).__init__()
         
         self.dim = dim
@@ -371,6 +443,9 @@ class AttentionBlock(nn.Module):
         self.norm1 = nn.LayerNorm(dim)
         self.norm2 = nn.LayerNorm(dim)
         self.norm3 = nn.LayerNorm(dim)
+        
+        # Text projection to match spatial feature dimension
+        self.text_proj = nn.Linear(text_dim, dim)
         
         # Self-attention
         self.self_attn = nn.MultiheadAttention(dim, heads, batch_first=True)
@@ -386,6 +461,8 @@ class AttentionBlock(nn.Module):
         self.proj_out = ModulatedConv(dim, dim, kernel_size=1)
     
     def forward(self, x, w, text_seq, kl_losses=None):
+        
+        
         batch_size, channels, height, width = x.shape
         
         # Project input
@@ -399,9 +476,12 @@ class AttentionBlock(nn.Module):
         sa_out, _ = self.self_attn(x_norm, x_norm, x_norm)
         x_flat = x_flat + sa_out
         
+        # Project text sequence to match spatial feature dimension
+        text_proj = self.text_proj(text_seq)
+        
         # Cross-attention
         x_norm = self.norm2(x_flat)
-        ca_out, _ = self.cross_attn(x_norm, text_seq, text_seq)
+        ca_out, _ = self.cross_attn(x_norm, text_proj, text_proj)
         x_flat = x_flat + ca_out
         
         # Back to spatial dimensions
@@ -422,7 +502,7 @@ class AttentionBlock(nn.Module):
         x_out = self.proj_out(x_spatial, w)
         
         return x_out, routing_probs
-
+    
 class ConvolutionBlock(nn.Module):
     """
     Convolution Block with MTMs (Modulated Transformation Modules).
@@ -439,19 +519,33 @@ class ConvolutionBlock(nn.Module):
             out_channels, out_channels, kernel_size=3,
             latent_dim=latent_dim, use_offset=True, resolution=resolution
         )
+        
+        # Add a projection layer for skip connection when dimensions don't match
+        self.skip_proj = None
+        if in_channels != out_channels:
+            self.skip_proj = ModulatedConv(
+                in_channels, out_channels, kernel_size=1,
+                latent_dim=latent_dim
+            )
     
     def forward(self, x, w):
+        # Save input for skip connection
+        identity = x
+        
         # First MTM
         out = self.mtm1(x, w)
         
         # Second MTM
         out = self.mtm2(out, w)
         
+        # Project skip connection if needed
+        if self.skip_proj is not None:
+            identity = self.skip_proj(identity, w)
+        
         # Skip connection
-        out = out + x
+        out = out + identity
         
         return out
-
 class GenerativeBlock(nn.Module):
     """
     Unit Generative Block combining Convolution and Attention blocks.
@@ -506,7 +600,7 @@ class AuroraGenerator(nn.Module):
             nn.Linear(text_embedding_dim, text_embedding_dim)
         )
         
-        # Mapping network (z, text_global -> w)
+        # Mapping network (z, text_embeddings -> w)
         self.mapping = nn.Sequential(
             nn.Linear(latent_dim + text_embedding_dim, 512),
             nn.LeakyReLU(0.2, inplace=True),
@@ -531,21 +625,30 @@ class AuroraGenerator(nn.Module):
         self.to_rgb_32 = ModulatedConv(64, 3, kernel_size=1)
         self.to_rgb_64 = ModulatedConv(32, 3, kernel_size=1)
     
-    def forward(self, z, text_embeddings, truncation_psi=0.7, return_routing=False):
+    def encode_text(self, text_or_embeddings):
+        """
+        Encode text using CLIP model if text is a string.
+        """
+        if isinstance(text_or_embeddings, str) or (isinstance(text_or_embeddings, list) and isinstance(text_or_embeddings[0], str)):
+            text_embeddings = encode_text_with_clip(text_or_embeddings)
+        else:
+            text_embeddings = text_or_embeddings
+        return text_embeddings
+    
+    def forward(self, z, text_input, truncation_psi=0.7, return_routing=False):
         batch_size = z.size(0)
         
-        # Process text embeddings directly (no CLIP encoding needed)
-        text_global = text_embeddings  # Use embeddings directly
+        text_embeddings = self.encode_text(text_input)
         
-        # Process text sequence for attention layers
+        # Process text sequence for attention layers - keep the full dimension
         text_seq = self.text_projection(text_embeddings).unsqueeze(1)  # [B, 1, D]
         
         # Concatenate z and text global feature
-        z_text = torch.cat([z, text_global], dim=1)
+        z_text = torch.cat([z, text_embeddings], dim=1)
         
         # Map to W space
         w = self.mapping(z_text)
-        
+            
         # Apply truncation trick (tradeoff between quality and diversity)
         if truncation_psi < 1.0:
             # Create mean latent vector
@@ -669,6 +772,18 @@ class AuroraGANLoss:
             g_loss = g_loss + kl_weight * kl_loss
         
         return g_loss
+    
+    def compute_clip_loss(self, images, text_input):
+        if isinstance(text_input, str) or (isinstance(text_input, list) and isinstance(text_input[0], str)):
+            text_embeddings = encode_text_with_clip(text_input)
+        else:
+            text_embeddings = text_input
+        
+        if text_embeddings.device != images.device:
+            text_embeddings = text_embeddings.to(images.device)
+        
+        return self.clip_loss(images, text_embeddings)
+
     
     def discriminator_loss(self, real_pred, fake_pred):
         # Logistic loss
@@ -915,7 +1030,7 @@ def sample_aurora_gan(generator, text_prompt, num_samples=1, truncation_psi=0.7,
     
     # Generate images
     with torch.no_grad():
-        fake_images, _ = generator(z, [text_prompt] * num_samples, truncation_psi=truncation_psi)
+        fake_images, _ = generator(z, text_prompt, truncation_psi=truncation_psi)
     
     return fake_images
 
