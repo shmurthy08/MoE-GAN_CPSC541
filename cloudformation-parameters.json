@@ -1,0 +1,8 @@
+{
+    "Parameters": {
+      "ProjectName": "moe-gan",
+      "EnvironmentName": "dev",
+      "TrainingInstanceType": "ml.g4dn.xlarge",
+      "InferenceInstanceType": "ml.g4dn.xlarge"
+    }
+  }

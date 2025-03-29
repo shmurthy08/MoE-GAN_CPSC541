@@ -5,44 +5,143 @@ phases:
     runtime-versions:
       python: 3.8
     commands:
-      - echo Installing minimal dependencies
-      - pip install awscli
+      - echo Installing dependencies
+      - pip install --upgrade pip
+      - pip install awscli boto3 sagemaker
   
   pre_build:
     commands:
-      - echo Setting up ECR variables
+      # Check for skip-train flag
+      - COMMIT_MSG=$(git log -1 --pretty=%B)
+      - echo "Commit message: $COMMIT_MSG"
+      - if echo "$COMMIT_MSG" | grep -q "\[skip-train\]"; then export SKIP_TRAINING=true; else export SKIP_TRAINING=false; fi
+      - echo "Skip training: $SKIP_TRAINING"
+      
+      # Check for data upload flag
+      - if echo "$COMMIT_MSG" | grep -q "\[upload-data\]"; then export UPLOAD_DATA=true; else export UPLOAD_DATA=false; fi
+      - echo "Upload data: $UPLOAD_DATA"
+      
+      # Setup environment variables
       - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-      - ECR_REPOSITORY_NAME="gan-text-to-image-dev-repository"
+      - PROJECT_NAME=$(cat cloudformation.yaml | grep -m 1 'ProjectName' -A 3 | grep 'Default:' | awk '{print $2}')
+      - ENVIRONMENT=$(cat cloudformation.yaml | grep -m 1 'EnvironmentName' -A 3 | grep 'Default:' | awk '{print $2}')
+      - ECR_REPOSITORY_NAME="${PROJECT_NAME}-${ENVIRONMENT}-repository"
       - ECR_REPOSITORY_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${ECR_REPOSITORY_NAME}"
       - COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
       - IMAGE_TAG=${COMMIT_HASH:=latest}
-      - echo "Full image name:$ECR_REPOSITORY_URI:$IMAGE_TAG"
-      # Try to create repository (or continue if it exists)
-      - aws ecr create-repository --repository-name ${ECR_REPOSITORY_NAME} || echo "Repository may already exist"
-      # Login to ECR
-      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin ${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com
       
+      # Create S3 bucket for model artifacts if it doesn't exist
+      - S3_BUCKET="${PROJECT_NAME}-${ENVIRONMENT}-artifacts-${ACCOUNT_ID}"
+      - S3_DATA_PREFIX="mscoco_processed"
+      - aws s3api head-bucket --bucket $S3_BUCKET 2>/dev/null || aws s3 mb s3://$S3_BUCKET
+  
   build:
     commands:
-      - echo Creating minimal required files
-      - mkdir -p scripts
-      - echo "print('Placeholder')" > train.py
-      - echo "def model_fn(model_dir):return {}" > inference.py
-      - echo "print('Placeholder')" > scripts/start_training_job.py
-      - echo "boto3>=1.20.0" > requirements.txt
-      - echo Building Docker image
-      - docker build -t $ECR_REPOSITORY_URI:$IMAGE_TAG .
-      - docker tag $ECR_REPOSITORY_URI:$IMAGE_TAG $ECR_REPOSITORY_URI:latest
+      # Create data upload script
+      - |
+        cat > upload_data.py << EOF
+        import boto3
+        import os
+        import argparse
+        
+        def upload_data_to_s3(local_dir, bucket, prefix):
+            s3 = boto3.client('s3')
+            
+            for filename in os.listdir(local_dir):
+                if filename.endswith('.npy') or filename.endswith('.pkl'):
+                    local_path = os.path.join(local_dir, filename)
+                    s3_key = f"{prefix}/{filename}"
+                    
+                    print(f"Uploading {local_path} to s3://{bucket}/{s3_key}")
+                    s3.upload_file(local_path, bucket, s3_key)
+        
+        if __name__ == "__main__":
+            parser = argparse.ArgumentParser()
+            parser.add_argument("--local-dir", required=True, help="Local directory with processed data")
+            parser.add_argument("--bucket", required=True, help="S3 bucket name")
+            parser.add_argument("--prefix", default="mscoco_processed", help="S3 prefix")
+            
+            args = parser.parse_args()
+            upload_data_to_s3(args.local_dir, args.bucket, args.prefix)
+        EOF
+      
+      # Conditionally upload data
+      - |
+        if [ "$UPLOAD_DATA" = "true" ]; then
+          echo "Uploading processed data to S3..."
+          # Check if data directory exists in expected location
+          if [ -d "data_processing/processed_data" ]; then
+            python upload_data.py --local-dir data_processing/processed_data --bucket $S3_BUCKET --prefix $S3_DATA_PREFIX
+            echo "Data upload completed."
+          else
+            echo "Data directory not found. Running data processing pipeline first..."
+            cd data_processing
+            python data_processing_pipeline.py --max_samples 1000  # Adjust parameters as needed
+            cd ..
+            python upload_data.py --local-dir data_processing/processed_data --bucket $S3_BUCKET --prefix $S3_DATA_PREFIX
+            echo "Data processing and upload completed."
+          fi
+        else
+          echo "Skipping data upload. Use [upload-data] in commit message to trigger."
+        fi
+      
+      # Build Docker images (as in your current buildspec)
+      - echo Building multi-stage Docker image
+      - docker build --target training -t ${ECR_REPOSITORY_URI}:${IMAGE_TAG}-training .
+      - docker build --target inference -t ${ECR_REPOSITORY_URI}:${IMAGE_TAG}-inference .
+      
+      # Tag latest
+      - docker tag ${ECR_REPOSITORY_URI}:${IMAGE_TAG}-training ${ECR_REPOSITORY_URI}:latest-training
+      - docker tag ${ECR_REPOSITORY_URI}:${IMAGE_TAG}-inference ${ECR_REPOSITORY_URI}:latest-inference
   
   post_build:
     commands:
+      # Push Docker images
       - echo Pushing to ECR
-      - docker push $ECR_REPOSITORY_URI:$IMAGE_TAG
-      - docker push $ECR_REPOSITORY_URI:latest
-      - echo "Image successfully pushed to:$ECR_REPOSITORY_URI:$IMAGE_TAG"
-      - echo "{\"ECRImageURI\":\"${ECR_REPOSITORY_URI}:${IMAGE_TAG}\"}" > build_output.json
+      - docker push ${ECR_REPOSITORY_URI}:${IMAGE_TAG}-training
+      - docker push ${ECR_REPOSITORY_URI}:${IMAGE_TAG}-inference
+      
+      # Only start training job if not skipped and we have data
+      - |
+        if [ "$SKIP_TRAINING" = "false" ]; then
+          echo "Checking if training data exists in S3..."
+          if aws s3 ls s3://${S3_BUCKET}/${S3_DATA_PREFIX}/ | grep -q ".npy"; then
+            echo "Starting SageMaker training job..."
+            TRAINING_JOB_NAME="${PROJECT_NAME}-${ENVIRONMENT}-training-${COMMIT_HASH}"
+            
+            # Get SageMaker role ARN (adjust according to how you retrieve this)
+            SAGEMAKER_ROLE_ARN=$(aws cloudformation describe-stacks --stack-name ${PROJECT_NAME}-${ENVIRONMENT} --query "Stacks[0].Outputs[?OutputKey=='SageMakerRoleArn'].OutputValue" --output text || echo "arn:aws:iam::${ACCOUNT_ID}:role/${PROJECT_NAME}-${ENVIRONMENT}-sagemaker-role")
+            
+            python scripts/start_training_job.py \
+              --job-name $TRAINING_JOB_NAME \
+              --role-arn $SAGEMAKER_ROLE_ARN \
+              --image-uri ${ECR_REPOSITORY_URI}:${IMAGE_TAG}-training \
+              --bucket $S3_BUCKET \
+              --prefix training/$TRAINING_JOB_NAME \
+              --data-bucket $S3_BUCKET \
+              --data-prefix $S3_DATA_PREFIX \
+              --instance-type ml.g4dn.xlarge
+          else
+            echo "No training data found in S3. Please use [upload-data] in your commit message first."
+            echo "Skipping training job."
+          fi
+        else
+          echo "Training job skipped as indicated in commit message"
+        fi
+      
+      # Create output file for CloudFormation
+      - |
+        cat > build_output.json << EOF
+        {
+          "TrainingImageUri":"${ECR_REPOSITORY_URI}:${IMAGE_TAG}-training",
+          "InferenceImageUri":"${ECR_REPOSITORY_URI}:${IMAGE_TAG}-inference",
+          "S3Bucket":"$S3_BUCKET",
+          "S3DataPrefix":"$S3_DATA_PREFIX"
+        }
+        EOF
 
 artifacts:
   files:
     - build_output.json
+    - cloudformation.yaml
   discard-paths: no
