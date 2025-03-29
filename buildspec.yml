@@ -13,14 +13,14 @@ phases:
     commands:
       # Check for skip-train flag
       - COMMIT_MSG=$(git log -1 --pretty=%B)
-      - echo "Commit message: $COMMIT_MSG"
+      - echo "Commit message:$COMMIT_MSG"
       - |
         if echo "$COMMIT_MSG" | grep -q "\[skip-train\]"; then
           export SKIP_TRAINING=true
         else
           export SKIP_TRAINING=false
         fi
-      - echo "Skip training: $SKIP_TRAINING"
+      - echo "Skip training:$SKIP_TRAINING"
 
       # Check for data upload flag
       - |
@@ -29,7 +29,7 @@ phases:
         else
           export UPLOAD_DATA=false
         fi
-      - echo "Upload data: $UPLOAD_DATA"
+      - echo "Upload data:$UPLOAD_DATA"
 
       # Setup environment variables
       - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
