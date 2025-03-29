@@ -12,7 +12,8 @@ phases:
   pre_build:
     commands:
       # Check for skip-train flag
-      - COMMIT_MSG=$(git log -1 --pretty=%B)
+      - echo "Pulling Commit Message from AWS CodePipeline"
+      - COMMIT_MSG=${CODEBUILD_RESOLVED_SOURCE_VERSION}
       - echo "Commit message:$COMMIT_MSG"
       - |
         if echo "$COMMIT_MSG" | grep -q "\[skip-train\]"; then
