@@ -254,6 +254,12 @@ def process_dataset_with_fiftyone(split="train", max_samples=MAX_SAMPLES):
     print(f"Saving metadata to {metadata_output_file}")
     with open(metadata_output_file, 'wb') as f:
         pickle.dump(metadata, f)
+        
+    captions_output_file = os.path.join(OUTPUT_DIR, f"mscoco_{split}_captions.npy")
+    np.save(captions_output_file, np.array(all_captions))
+    np.save(images_output_file, all_images)
+    with open(metadata_output_file, 'wb') as f:
+        pickle.dump(metadata, f)
     
     return all_images, all_embeddings, metadata
 
@@ -417,20 +423,35 @@ def analyze_dataset(metadata):
         json.dump(stats, f, indent=4)
 
 class ProcessedMSCOCODataset(Dataset):
-    """MS-COCO dataset with preprocessed images and CLIP text embeddings."""
+    """MS-COCO dataset with preprocessed images, CLIP text embeddings, and original captions."""
     
-    def __init__(self, images_file, text_embeddings_file, transform=None):
+    def __init__(self, images_file, text_embeddings_file, captions_file=None, metadata_file=None, transform=None):
         """
         Args:
             images_file (string): Path to the numpy file with images
             text_embeddings_file (string): Path to the numpy file with text embeddings
+            captions_file (string, optional): Path to the numpy file with captions
+            metadata_file (string, optional): Path to the pickle file with metadata
             transform (callable, optional): Optional transform to be applied on images
         """
         self.images = np.load(images_file)
         self.text_embeddings = np.load(text_embeddings_file)
         self.transform = transform
         
+        # Load captions if available
+        self.captions = None
+        if captions_file and os.path.exists(captions_file):
+            self.captions = np.load(captions_file, allow_pickle=True)
+        
+        # Load metadata if available
+        self.metadata = None
+        if metadata_file and os.path.exists(metadata_file):
+            with open(metadata_file, 'rb') as f:
+                self.metadata = pickle.load(f)
+        
         assert len(self.images) == len(self.text_embeddings), "Images and text embeddings count mismatch"
+        if self.captions is not None:
+            assert len(self.images) == len(self.captions), "Images and captions count mismatch"
     
     def __len__(self):
         return len(self.images)
@@ -442,8 +463,13 @@ class ProcessedMSCOCODataset(Dataset):
         if self.transform:
             image = self.transform(image)
         
-        return image, text_embedding
-
+        # Return captions if available, otherwise just images and embeddings
+        if self.captions is not None:
+            caption = self.captions[idx]
+            return image, text_embedding, caption
+        else:
+            return image, text_embedding
+        
 # Main function to run the entire pipeline
 def run_pipeline(max_samples=MAX_SAMPLES, create_augmentations_flag=True, augmentation_factor=2):
     """
