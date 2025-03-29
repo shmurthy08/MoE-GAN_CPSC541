@@ -6,25 +6,23 @@ FROM python:3.8-slim as base
 WORKDIR /app
 
 # Install system dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    git \
-    curl \
-    libgl1-mesa-glx \
-    libglib2.0-0 \
-    && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        build-essential \
+        git \
+        curl \
+        libgl1-mesa-glx \
+        libglib2.0-0 && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
-# Install basic Python packages
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Install CLIP and other ML dependencies
-RUN pip install --no-cache-dir \
-    torch==1.10.1 \
-    torchvision==0.11.2 \
-    clip-by-openai \
-    fiftyone \
-    tensorboard
+# Copy and install Python dependencies
+COPY requirements.txt . 
+RUN pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir \
+        clip-by-openai \
+        fiftyone \
+        tensorboard
 
 # Copy common code files
 COPY moegan/*.py /app/moegan/
@@ -60,7 +58,7 @@ RUN pip install --no-cache-dir \
     sagemaker-inference
 
 # Copy inference code
-COPY moegan/inference.py /app/
+# COPY moegan/inference.py /app/
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
