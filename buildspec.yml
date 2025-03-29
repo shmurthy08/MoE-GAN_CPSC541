@@ -14,13 +14,23 @@ phases:
       # Check for skip-train flag
       - COMMIT_MSG=$(git log -1 --pretty=%B)
       - echo "Commit message: $COMMIT_MSG"
-      - if echo "$COMMIT_MSG" | grep -q "\[skip-train\]"; then export SKIP_TRAINING=true; else export SKIP_TRAINING=false; fi
+      - |
+        if echo "$COMMIT_MSG" | grep -q "\[skip-train\]"; then
+          export SKIP_TRAINING=true
+        else
+          export SKIP_TRAINING=false
+        fi
       - echo "Skip training: $SKIP_TRAINING"
-      
+
       # Check for data upload flag
-      - if echo "$COMMIT_MSG" | grep -q "\[upload-data\]"; then export UPLOAD_DATA=true; else export UPLOAD_DATA=false; fi
+      - |
+        if echo "$COMMIT_MSG" | grep -q "\[upload-data\]"; then
+          export UPLOAD_DATA=true
+        else
+          export UPLOAD_DATA=false
+        fi
       - echo "Upload data: $UPLOAD_DATA"
-      
+
       # Setup environment variables
       - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
       - PROJECT_NAME=$(cat cloudformation.yaml | grep -m 1 'ProjectName' -A 3 | grep 'Default:' | awk '{print $2}')
@@ -29,7 +39,7 @@ phases:
       - ECR_REPOSITORY_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${ECR_REPOSITORY_NAME}"
       - COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
       - IMAGE_TAG=${COMMIT_HASH:=latest}
-      
+
       # Create S3 bucket for model artifacts if it doesn't exist
       - S3_BUCKET="${PROJECT_NAME}-${ENVIRONMENT}-artifacts-${ACCOUNT_ID}"
       - S3_DATA_PREFIX="mscoco_processed"
