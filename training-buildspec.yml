@@ -1,0 +1,90 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      python: 3.8
+    commands:
+      - echo Installing dependencies
+      - pip install --upgrade pip
+      - pip install awscli boto3 sagemaker
+  
+  pre_build:
+    commands:
+      # Setup environment variables
+      - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - PROJECT_NAME=$(cat cloudformation.yaml | grep -m 1 'ProjectName' -A 3 | grep 'Default:' | awk '{print $2}')
+      - ENVIRONMENT=$(cat cloudformation.yaml | grep -m 1 'EnvironmentName' -A 3 | grep 'Default:' | awk '{print $2}')
+      
+      # Get bucket information
+      - S3_BUCKET="${PROJECT_NAME}-${ENVIRONMENT}-artifacts-${ACCOUNT_ID}"
+      - S3_DATA_PREFIX="mscoco_processed"
+      
+      # Check training flag
+      - |
+        SKIP_TRAINING=$(aws ssm get-parameter --name "/${PROJECT_NAME}/${ENVIRONMENT}/skip-training" --query "Parameter.Value" --output text || echo "true")
+        echo "Skip training: $SKIP_TRAINING"
+      
+      # Get image URIs from previous stage
+      - |
+        if [ -f ../BuildOutput/build_output.json ]; then
+          TRAINING_IMAGE_URI=$(cat ../BuildOutput/build_output.json | jq -r '.TrainingImageUri')
+          INFERENCE_IMAGE_URI=$(cat ../BuildOutput/build_output.json | jq -r '.InferenceImageUri')
+          echo "Training image: $TRAINING_IMAGE_URI"
+          echo "Inference image: $INFERENCE_IMAGE_URI"
+        else
+          echo "Could not find build output. Using default image URIs."
+          TRAINING_IMAGE_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${PROJECT_NAME}-${ENVIRONMENT}-repository:latest-training"
+          INFERENCE_IMAGE_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${PROJECT_NAME}-${ENVIRONMENT}-repository:latest-inference"
+        fi
+  
+  build:
+    commands:
+      # Check if training data exists in S3
+      - |
+        if [ "$SKIP_TRAINING" = "false" ]; then
+          echo "Checking if training data exists in S3..."
+          if aws s3 ls s3://${S3_BUCKET}/${S3_DATA_PREFIX}/ | grep -q ".npy"; then
+            echo "Starting SageMaker training job..."
+            TRAINING_JOB_NAME="${PROJECT_NAME}-${ENVIRONMENT}-training-${COMMIT_HASH:-$(date +%Y%m%d%H%M%S)}"
+            
+            # Get SageMaker role ARN
+            SAGEMAKER_ROLE_ARN=$(aws cloudformation describe-stacks --stack-name ${PROJECT_NAME}-${ENVIRONMENT} --query "Stacks[0].Outputs[?OutputKey=='SageMakerRoleArn'].OutputValue" --output text || echo "arn:aws:iam::${ACCOUNT_ID}:role/${PROJECT_NAME}-${ENVIRONMENT}-sagemaker-role")
+            
+            # Start training job
+            python scripts/start_training_job.py \
+              --job-name $TRAINING_JOB_NAME \
+              --role-arn $SAGEMAKER_ROLE_ARN \
+              --image-uri $TRAINING_IMAGE_URI \
+              --bucket $S3_BUCKET \
+              --prefix training/$TRAINING_JOB_NAME \
+              --data-bucket $S3_BUCKET \
+              --data-prefix $S3_DATA_PREFIX \
+              --instance-type ml.g4dn.xlarge
+              
+            echo "Training job started: $TRAINING_JOB_NAME"
+          else
+            echo "No training data found in S3. Cannot start training job."
+            echo "Skipping training job."
+          fi
+        else
+          echo "Training job skipped as indicated by SSM parameter"
+        fi
+  
+  post_build:
+    commands:
+      # Create output file
+      - |
+        cat > training_output.json << EOF
+        {
+          "TrainingInitiated": "$([[ "$SKIP_TRAINING" = "false" ]] && echo "true" || echo "false")",
+          "S3Bucket":"$S3_BUCKET",
+          "S3DataPrefix":"$S3_DATA_PREFIX"
+        }
+        EOF
+      - echo "Training stage complete."
+
+artifacts:
+  files:
+    - training_output.json
+  discard-paths: yes
