@@ -103,6 +103,8 @@ phases:
           if [ -d "data_processing/processed_data" ]; then
             echo "Data directory found. Running Pipeline to upload npy files..."
             cd data_processing
+            echo "Installing required Python packages..."
+            pip install torch==2.1.0 torchvision==0.16.0 clip-by-openai fiftyone matplotlib tqdm pandas pillow numpy ftfy regex
             python data_processing_pipeline.py --max_samples -1  # Adjust parameters as needed
             cd ..
             # Upload data to S3
