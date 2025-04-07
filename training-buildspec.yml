@@ -22,7 +22,7 @@ phases:
       
       # Check training flag
       - |
-        SKIP_TRAINING=$(aws ssm get-parameter --name "/${PROJECT_NAME}/${ENVIRONMENT}/skip-training" --query "Parameter.Value" --output text || echo "true")
+        SKIP_TRAINING=$(aws ssm get-parameter --name "/moe-gan/${ENVIRONMENT}/skip-training" --query "Parameter.Value" --output text || echo "true")
         echo "Skip training: $SKIP_TRAINING"
       
       # Get image URIs from previous stage

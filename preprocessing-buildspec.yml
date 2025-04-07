@@ -23,7 +23,7 @@ phases:
       
       # Check preprocessing flag
       - |
-        UPLOAD_DATA=$(aws ssm get-parameter --name "/${PROJECT_NAME}/${ENVIRONMENT}/upload-data" --query "Parameter.Value" --output text || echo "false")
+        UPLOAD_DATA=$(aws ssm get-parameter --name "/moe-gan/${ENVIRONMENT}/upload-data" --query "Parameter.Value" --output text || echo "false")
         echo "Upload data: $UPLOAD_DATA"
   
   build:
@@ -97,11 +97,11 @@ phases:
           python upload_data.py --local-dir data_processing/processed_data --bucket $S3_BUCKET --prefix $S3_DATA_PREFIX
           
           # Update parameter store to avoid reprocessing next time
-          aws ssm put-parameter --name "/${PROJECT_NAME}/${ENVIRONMENT}/upload-data" --type "String" --value "false" --overwrite
+          aws ssm put-parameter --name "/moe-gan/${ENVIRONMENT}/upload-data" --type "String" --value "false" --overwrite
           
           echo "Data processing and upload completed."
         else
-          echo "Skipping data processing. To process data, set the SSM parameter /${PROJECT_NAME}/${ENVIRONMENT}/upload-data to 'true'"
+          echo "Skipping data processing. To process data, set the SSM parameter /moe-gan/${ENVIRONMENT}/upload-data to 'true'"
         fi
   
   post_build:
