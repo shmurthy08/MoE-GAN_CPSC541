@@ -34,6 +34,8 @@ phases:
   
   build:
     commands:
+      - echo "Checking available disk space:"
+      - df -h
       # Before uploading, add these debug commands:
       - echo "Checking S3 bucket name:"
       - echo $S3_BUCKET
@@ -105,7 +107,7 @@ phases:
             cd data_processing
             echo "Installing required Python packages..."
             pip install torch==1.7.1 torchvision==0.8.2 clip-by-openai fiftyone matplotlib tqdm pandas pillow numpy ftfy regex
-            python data_processing_pipeline.py --max_samples -1  # Adjust parameters as needed
+            python data_processing_pipeline.py --max_samples 100000  # Adjust parameters as needed
             cd ..
             # Upload data to S3
             python upload_data.py --local-dir data_processing/processed_data --bucket $S3_BUCKET --prefix $S3_DATA_PREFIX
