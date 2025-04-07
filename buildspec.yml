@@ -7,17 +7,10 @@ phases:
     commands:
       - echo Installing dependencies
       - pip install --upgrade pip
-      - pip install awscli boto3 sagemaker
+      - pip install awscli boto3
   
   pre_build:
     commands:
-      - |
-        SKIP_TRAINING=$(aws ssm get-parameter --name "/moe-gan/dev/skip-training" --query "Parameter.Value" --output text || echo "true")
-        UPLOAD_DATA=$(aws ssm get-parameter --name "/moe-gan/dev/upload-data" --query "Parameter.Value" --output text || echo "false")
-      - echo "Skip training:$SKIP_TRAINING"
-      - echo "Upload data:$UPLOAD_DATA"
-
-
       # Setup environment variables
       - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
       - PROJECT_NAME=$(cat cloudformation.yaml | grep -m 1 'ProjectName' -A 3 | grep 'Default:' | awk '{print $2}')
@@ -26,105 +19,10 @@ phases:
       - ECR_REPOSITORY_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${ECR_REPOSITORY_NAME}"
       - COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
       - IMAGE_TAG=${COMMIT_HASH:=latest}
-
-      # Create S3 bucket for model artifacts if it doesn't exist
-      - S3_BUCKET="${PROJECT_NAME}-${ENVIRONMENT}-artifacts-${ACCOUNT_ID}"
-      - S3_DATA_PREFIX="mscoco_processed"
-      - aws s3api head-bucket --bucket $S3_BUCKET 2>/dev/null || aws s3 mb s3://$S3_BUCKET
   
   build:
     commands:
-      - echo "Checking available disk space:"
-      - df -h
-      # Before uploading, add these debug commands:
-      - echo "Checking S3 bucket name:"
-      - echo $S3_BUCKET
-      - echo "Checking data directory existence:"
-      - ls -la data_processing/
-      - echo "Checking processed data directory:"
-      - ls -la data_processing/processed_data/ || echo "Directory does not exist"
-      - echo "DEBUG:AWS S3 permissions test:"
-      - aws s3 ls s3://$S3_BUCKET/ || echo "Cannot list bucket"
-      - echo "Creating test file for S3 upload:"
-      - echo "test data" > test_upload.txt
-      - aws s3 cp test_upload.txt s3://$S3_BUCKET/test_upload.txt || echo "Failed to upload test file"
-      
-      # Modify the upload_data.py script with better error handling
-      - |
-        cat > upload_data.py << EOF
-        import boto3
-        import os
-        import argparse
-        import sys
-        
-        def upload_data_to_s3(local_dir, bucket, prefix):
-            s3 = boto3.client('s3')
-            
-            print(f"Checking directory: {local_dir}")
-            if not os.path.exists(local_dir):
-                print(f"ERROR: Directory {local_dir} does not exist!")
-                return False
-                
-            files = os.listdir(local_dir)
-            print(f"Files in directory ({len(files)} total): {files}")
-            
-            upload_count = 0
-            for filename in files:
-                if filename.endswith('.npy') or filename.endswith('.pkl'):
-                    local_path = os.path.join(local_dir, filename)
-                    s3_key = f"{prefix}/{filename}"
-                    
-                    print(f"Uploading {local_path} to s3://{bucket}/{s3_key}")
-                    try:
-                        s3.upload_file(local_path, bucket, s3_key)
-                        upload_count += 1
-                        print(f"Successfully uploaded {filename}")
-                    except Exception as e:
-                        print(f"ERROR uploading {filename}: {str(e)}")
-            
-            print(f"Upload complete. Uploaded {upload_count} files.")
-            return upload_count > 0
-        
-        if __name__ == "__main__":
-            parser = argparse.ArgumentParser()
-            parser.add_argument("--local-dir", required=True, help="Local directory with processed data")
-            parser.add_argument("--bucket", required=True, help="S3 bucket name")
-            parser.add_argument("--prefix", default="mscoco_processed", help="S3 prefix")
-            
-            args = parser.parse_args()
-            success = upload_data_to_s3(args.local_dir, args.bucket, args.prefix)
-            if not success:
-                print("WARNING: No files were uploaded!")
-        EOF
-      
-      # Conditionally upload data
-      - |
-        if [ "$UPLOAD_DATA" = "true" ]; then
-          echo "Uploading processed data to S3..."
-          # Check if data directory exists in expected location
-          if [ -d "data_processing/processed_data" ]; then
-            echo "Data directory found. Running Pipeline to upload npy files..."
-            cd data_processing
-            echo "Installing required Python packages..."
-            pip install torch==1.7.1 torchvision==0.8.2 clip-by-openai fiftyone matplotlib tqdm pandas pillow numpy ftfy regex
-            python data_processing_pipeline.py --max_samples 100000  # Adjust parameters as needed
-            cd ..
-            # Upload data to S3
-            python upload_data.py --local-dir data_processing/processed_data --bucket $S3_BUCKET --prefix $S3_DATA_PREFIX
-            echo "Data upload completed."
-          else
-            echo "Data directory not found. Running data processing pipeline first..."
-            cd data_processing
-            python data_processing_pipeline.py --max_samples -1  # Adjust parameters as needed
-            cd ..
-            python upload_data.py --local-dir data_processing/processed_data --bucket $S3_BUCKET --prefix $S3_DATA_PREFIX
-            echo "Data processing and upload completed."
-          fi
-        else
-          echo "Skipping data upload. Use [upload-data] in commit message to trigger."
-        fi
-      
-      # Build Docker images (as in your current buildspec)
+      # Build Docker images
       - echo Building multi-stage Docker image
       - docker build --target training -t ${ECR_REPOSITORY_URI}:${IMAGE_TAG}-training .
       - docker build --target inference -t ${ECR_REPOSITORY_URI}:${IMAGE_TAG}-inference .
@@ -142,47 +40,18 @@ phases:
       - docker push ${ECR_REPOSITORY_URI}:${IMAGE_TAG}-training
       - docker push ${ECR_REPOSITORY_URI}:${IMAGE_TAG}-inference
       
-      # Only start training job if not skipped and we have data
-      - |
-        if [ "$SKIP_TRAINING" = "false" ]; then
-          echo "Checking if training data exists in S3..."
-          if aws s3 ls s3://${S3_BUCKET}/${S3_DATA_PREFIX}/ | grep -q ".npy"; then
-            echo "Starting SageMaker training job..."
-            TRAINING_JOB_NAME="${PROJECT_NAME}-${ENVIRONMENT}-training-${COMMIT_HASH}"
-            
-            # Get SageMaker role ARN (adjust according to how you retrieve this)
-            SAGEMAKER_ROLE_ARN=$(aws cloudformation describe-stacks --stack-name ${PROJECT_NAME}-${ENVIRONMENT} --query "Stacks[0].Outputs[?OutputKey=='SageMakerRoleArn'].OutputValue" --output text || echo "arn:aws:iam::${ACCOUNT_ID}:role/${PROJECT_NAME}-${ENVIRONMENT}-sagemaker-role")
-            
-            python scripts/start_training_job.py \
-              --job-name $TRAINING_JOB_NAME \
-              --role-arn $SAGEMAKER_ROLE_ARN \
-              --image-uri ${ECR_REPOSITORY_URI}:${IMAGE_TAG}-training \
-              --bucket $S3_BUCKET \
-              --prefix training/$TRAINING_JOB_NAME \
-              --data-bucket $S3_BUCKET \
-              --data-prefix $S3_DATA_PREFIX \
-              --instance-type m4.xlarge
-          else
-            echo "No training data found in S3. Please use [upload-data] in your commit message first."
-            echo "Skipping training job."
-          fi
-        else
-          echo "Training job skipped as indicated in commit message"
-        fi
-      
-      # Create output file for CloudFormation
+      # Create output file
       - |
         cat > build_output.json << EOF
         {
           "TrainingImageUri":"${ECR_REPOSITORY_URI}:${IMAGE_TAG}-training",
           "InferenceImageUri":"${ECR_REPOSITORY_URI}:${IMAGE_TAG}-inference",
-          "S3Bucket":"$S3_BUCKET",
-          "S3DataPrefix":"$S3_DATA_PREFIX"
+          "S3Bucket":"${PROJECT_NAME}-${ENVIRONMENT}-artifacts-${ACCOUNT_ID}",
+          "S3DataPrefix":"mscoco_processed"
         }
         EOF
 
 artifacts:
   files:
     - build_output.json
-    - cloudformation.yaml
-  discard-paths: no
+  discard-paths: yes
