@@ -40,7 +40,7 @@ phases:
       - echo "Checking data directory existence:"
       - ls -la data_processing/
       - echo "Checking processed data directory:"
-      - ls -la data_processing || echo "Directory does not exist"
+      - ls -la data_processing/processed_data/ || echo "Directory does not exist"
       - echo "DEBUG:AWS S3 permissions test:"
       - aws s3 ls s3://$S3_BUCKET/ || echo "Cannot list bucket"
       - echo "Creating test file for S3 upload:"
@@ -101,7 +101,12 @@ phases:
           echo "Uploading processed data to S3..."
           # Check if data directory exists in expected location
           if [ -d "data_processing/processed_data" ]; then
-            python upload_data.py --local-dir data_processing --bucket $S3_BUCKET --prefix $S3_DATA_PREFIX
+            echo "Data directory found. Running Pipeline to upload npy files..."
+            cd data_processing
+            python data_processing_pipeline.py --max_samples -1  # Adjust parameters as needed
+            cd ..
+            # Upload data to S3
+            python upload_data.py --local-dir data_processing/processed_data --bucket $S3_BUCKET --prefix $S3_DATA_PREFIX
             echo "Data upload completed."
           else
             echo "Data directory not found. Running data processing pipeline first..."
