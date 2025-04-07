@@ -25,7 +25,10 @@ Parameters:
   
   InstanceType:
     Type: String
-    Default: ml.t2.medium
+    Default: m4.xlarge
+    AllowedValues:
+      - m5.xlarge
+      - ml.t2.medium
     Description: SageMaker instance type for the endpoint (free tier eligible)
 
 Resources:
