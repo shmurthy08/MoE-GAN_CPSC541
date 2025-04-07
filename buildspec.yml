@@ -108,6 +108,8 @@ phases:
   post_build:
     commands:
       # Push Docker images
+      - echo "Authenticating with ECR"
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin ${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com
       - echo Pushing to ECR
       - docker push ${ECR_REPOSITORY_URI}:${IMAGE_TAG}-training
       - docker push ${ECR_REPOSITORY_URI}:${IMAGE_TAG}-inference
