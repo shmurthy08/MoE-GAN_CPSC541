@@ -54,7 +54,7 @@ phases:
             --bucket $S3_BUCKET \
             --prefix $S3_DATA_PREFIX \
             --max-samples -1 \
-            --instance-type ml.m5.24xlarge \
+            --instance-type ml.m5.4xlarge \
             --volume-size 500
           
           # Update parameter store to avoid reprocessing next time

@@ -192,7 +192,7 @@ def main():
                         help='If set, disable data augmentation (default: augmentation is enabled).')
     parser.add_argument('--aug-factor', type=int, default=2,
                         help='Factor by which to augment the data if augmentation is enabled (default: 2).')
-    parser.add_argument('--instance-type', type=str, default='ml.m5.24xlarge',
+    parser.add_argument('--instance-type', type=str, default='ml.m5.4xlarge',
                         help='The EC2 instance type for the SageMaker Processing Job (default: ml.m5.24xlarge).')
     parser.add_argument('--volume-size', type=int, default=500,
                         help='The size in GB of the EBS volume attached to the processing instance (default: 500).')
