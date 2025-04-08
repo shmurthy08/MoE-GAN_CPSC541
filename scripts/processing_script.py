@@ -107,7 +107,11 @@ def main():
     print(f"  output directory: {args.output_data_dir}")
     
     # Install additional dependencies for data processing
-    print("Installing required dependencies...")
+    print("Installing system dependencies...")
+    os.system("apt-get update && apt-get install -y libgl1-mesa-glx libglib2.0-0")
+
+    print("Installing Python dependencies...")
+    os.system("pip install opencv-python-headless==4.5.3.56")
     os.system("pip install torch==1.7.1 torchvision==0.8.2 clip-by-openai fiftyone matplotlib tqdm pandas pillow numpy ftfy regex")
     
     # Batch processing for large datasets
