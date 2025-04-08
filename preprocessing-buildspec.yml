@@ -34,27 +34,35 @@ phases:
       # Conditionally process and upload data
       - |
         if [ "$UPLOAD_DATA" = "true" ]; then
-          echo "Creating SageMaker Processing Job for data processing..."
-          # Install dependencies for launching the job
-          pip install boto3 sagemaker
+          echo "Launching SageMaker Processing Job for MS-COCO dataset processing..."
           
-          # Copy processing script to scripts directory
-          cp processing_script.py scripts/
+          # Get SageMaker role ARN
+          SAGEMAKER_ROLE_ARN=$(aws cloudformation describe-stacks --stack-name STACKMOEGAN --query "Stacks[0].Outputs[?OutputKey=='SageMakerRoleArn'].OutputValue" --output text)
           
-          # Launch processing job
-          SAGEMAKER_ROLE_ARN=$(aws cloudformation describe-stacks --stack-name ${PROJECT_NAME}-${ENVIRONMENT} --query "Stacks[0].Outputs[?OutputKey=='SageMakerRoleArn'].OutputValue" --output text || echo "arn:aws:iam::${ACCOUNT_ID}:role/${PROJECT_NAME}-${ENVIRONMENT}-sagemaker-role")
+          # If the ARN retrieval fails, use a hardcoded backup
+          if [ -z "$SAGEMAKER_ROLE_ARN" ]; then
+            echo "Failed to get SageMaker role ARN from CloudFormation, using default"
+            SAGEMAKER_ROLE_ARN="arn:aws:iam::207567761455:role/${PROJECT_NAME}-${ENVIRONMENT}-sagemaker-role"
+          fi
           
+          echo "Using SageMaker role ARN: $SAGEMAKER_ROLE_ARN"
+          
+          # Launch processing job with GitHub repository URL
+          GITHUB_REPO="https://github.com/shmurthy08/MoE-GAN_CPSC541"
           python scripts/launch_processing_job.py \
             --role-arn $SAGEMAKER_ROLE_ARN \
             --bucket $S3_BUCKET \
             --prefix $S3_DATA_PREFIX \
             --max-samples -1 \
-            --instance-type ml.m5.4xlarge \
-            --volume-size 300
+            --instance-type ml.m5.24xlarge \
+            --volume-size 500
+          
+          # Update parameter store to avoid reprocessing next time
+          aws ssm put-parameter --name "/${PROJECT_NAME}/${ENVIRONMENT}/upload-data" --type "String" --value "false" --overwrite
           
           echo "SageMaker Processing Job launched. Data will be uploaded to S3: s3://${S3_BUCKET}/${S3_DATA_PREFIX}/"
         else
-          echo "Skipping data processing. Use [upload-data] in commit message to trigger."
+          echo "Skipping data processing. To process data, set the SSM parameter /${PROJECT_NAME}/${ENVIRONMENT}/upload-data to 'true'"
         fi
   
   post_build:

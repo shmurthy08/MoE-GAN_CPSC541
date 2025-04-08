@@ -129,11 +129,10 @@ def main():
                 max_samples=batch_size,
                 create_augmentations_flag=not args.no_augmentation,
                 augmentation_factor=args.aug_factor,
-                start_idx=start_idx
             )
             
             # Upload this batch to S3
-            print(f"Uploading batch {batch_num} to S3")
+            print(f"Uploading to S3")
             batch_prefix = f"{args.s3_output_path}/batch_{batch_num}"
             upload_to_s3(os.path.dirname(os.path.abspath(__file__)) + "/processed_data", batch_prefix)
             
