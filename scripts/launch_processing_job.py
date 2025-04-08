@@ -13,7 +13,7 @@ def launch_processing_job(
     max_samples=-1,  # -1 processes all images
     no_augmentation=False,
     aug_factor=2,
-    instance_type='ml.m5.24xlarge',
+    instance_type='ml.m5.4xlarge',
     volume_size=500,
     wait=False
 ):
@@ -56,7 +56,7 @@ def main():
     
     # Clone the repository to access the processing code
     print("Cloning repository to access data processing code...")
-    repo_url = os.environ.get('REPOSITORY_URL')
+    repo_url = "https://github.com/shmurthy08/MoE-GAN_CPSC541"
     if not repo_url:
         print("Error: Repository URL not provided")
         return
@@ -123,7 +123,7 @@ if __name__ == "__main__":
             "MaxRuntimeInSeconds": 172800  # 48 hours
         },
         AppSpecification={
-            "ImageUri": "763104351884.dkr.ecr.us-east-1.amazonaws.com/pytorch-processing:1.7.1-cpu-py3",
+            "ImageUri": "763104351884.dkr.ecr.us-east-1.amazonaws.com/pytorch-training:1.7.1-gpu-py3",
             "ContainerEntrypoint": ["python3", "/opt/ml/processing/input/code/processing_script.py"]
         },
         ProcessingInputs=[
