@@ -147,7 +147,7 @@ if __name__ == "__main__":
             "MAX_SAMPLES": str(max_samples),
             "NO_AUGMENTATION": "true" if no_augmentation else "false",
             "AUG_FACTOR": str(aug_factor),
-            "REPOSITORY_URL": "https://github.com/yourusername/yourrepo.git"  # Replace with your GitHub repo URL
+            "REPOSITORY_URL": "https://github.com/shmurthy08/MoE-GAN_CPSC541"  # Replace with your GitHub repo URL
         }
     )
     

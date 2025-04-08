@@ -18,7 +18,8 @@ import fiftyone.zoo as foz
 import torchvision.utils as vutils
 
 # constants
-OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "processed_data")
+OUTPUT_DIR = os.environ.get("SM_OUTPUT_DATA_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "processed_data"))
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 BATCH_SIZE = 64
 IMAGE_SIZE = 64
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -26,7 +27,6 @@ CLIP_MODEL_TYPE = "ViT-B/32"
 MAX_SAMPLES = 5000
 
 # creates output directory if doesn't exist
-os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # load CLIP model
 print(f"Loading CLIP model: {CLIP_MODEL_TYPE}")
