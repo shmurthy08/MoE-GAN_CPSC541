@@ -47,8 +47,11 @@ import glob
 def main():
     print("Starting MS-COCO data processing pipeline...")
     
-    # Install required dependencies
-    print("Installing dependencies...")
+    print("Installing system dependencies...")
+    os.system("apt-get update && apt-get install -y libgl1-mesa-glx libglib2.0-0")
+
+    print("Installing Python dependencies...")
+    os.system("pip install opencv-python-headless==4.5.3.56")
     os.system("pip install torch==1.7.1 torchvision==0.8.2 clip-by-openai fiftyone matplotlib tqdm pandas pillow numpy ftfy regex")
     
     # Create output directory
