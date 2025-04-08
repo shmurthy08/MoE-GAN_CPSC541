@@ -47,12 +47,13 @@ phases:
           
           echo "Using SageMaker role ARN: $SAGEMAKER_ROLE_ARN"
           
-          # Launch processing job
+          # Launch processing job with GitHub repository URL
+          GITHUB_REPO="https://github.com/shmurthy08/MoE-GAN_CPSC541"
           python scripts/launch_processing_job.py \
             --role-arn $SAGEMAKER_ROLE_ARN \
             --bucket $S3_BUCKET \
             --prefix $S3_DATA_PREFIX \
-            --max-samples 1000 \
+            --max-samples -1 \
             --instance-type ml.m5.24xlarge \
             --volume-size 500
           
