@@ -10,11 +10,11 @@ def launch_processing_job(
     role_arn,
     bucket,
     prefix='mscoco_processed',
-    max_samples=-1,  # -1 will process all images
+    max_samples=-1,  # -1 processes all images
     no_augmentation=False,
     aug_factor=2,
-    instance_type='ml.m5.24xlarge',  # Larger instance for full dataset
-    volume_size=500,  # Increased EBS volume size for the full dataset
+    instance_type='ml.m5.24xlarge',
+    volume_size=500,
     wait=False
 ):
     sagemaker = boto3.client('sagemaker')
@@ -22,9 +22,6 @@ def launch_processing_job(
     # Generate a unique job name
     timestamp = datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
     job_name = f"moe-gan-data-processing-{timestamp}"
-    
-    # Configure processing inputs
-    inputs = []
     
     # Configure processing output
     s3_output_path = f"s3://{bucket}/{prefix}"
@@ -39,31 +36,78 @@ def launch_processing_job(
         }
     ]
     
-    # Prepare a tar.gz of code directory
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    parent_dir = os.path.dirname(current_dir)
-    code_path = os.path.join(current_dir, "code.tar.gz")
+    # Create a processing script that will download and run your code
+    processing_script = """
+import os
+import sys
+import boto3
+import subprocess
+import glob
+
+def main():
+    print("Starting MS-COCO data processing pipeline...")
     
-    # Create tar.gz with your code
-    if os.system(f"tar -czf {code_path} -C {parent_dir} data_processing/ scripts/ *.py") != 0:
-        print("Failed to create code archive")
-        sys.exit(1)
+    # Install required dependencies
+    print("Installing dependencies...")
+    os.system("pip install torch==1.7.1 torchvision==0.8.2 clip-by-openai fiftyone matplotlib tqdm pandas pillow numpy ftfy regex")
     
-    # Upload code to S3
-    code_prefix = f"code/{job_name}/code.tar.gz"
+    # Create output directory
+    os.makedirs("/opt/ml/processing/output", exist_ok=True)
+    
+    # Clone the repository to access the processing code
+    print("Cloning repository to access data processing code...")
+    repo_url = os.environ.get('REPOSITORY_URL')
+    if not repo_url:
+        print("Error: Repository URL not provided")
+        return
+        
+    os.system(f"git clone {repo_url} /tmp/repo")
+    
+    # Copy the data_processing directory to the current working directory
+    os.system("cp -r /tmp/repo/data_processing .")
+    
+    # Run the data processing pipeline
+    print("Running data processing pipeline...")
+    max_samples = os.environ.get('MAX_SAMPLES', '-1')
+    no_augmentation = os.environ.get('NO_AUGMENTATION', 'false')
+    aug_factor = os.environ.get('AUG_FACTOR', '2')
+    
+    cmd = f"cd data_processing && python data_processing_pipeline.py --max_samples {max_samples}"
+    if no_augmentation.lower() == 'true':
+        cmd += " --no_augmentation"
+    cmd += f" --aug_factor {aug_factor}"
+    
+    print(f"Running command: {cmd}")
+    os.system(cmd)
+    
+    # Copy the processed files to the output directory
+    print("Copying processed files to output directory...")
+    os.system("cp -r data_processing/processed_data/* /opt/ml/processing/output/")
+    
+    # List the output files
+    print("Output directory contents:")
+    os.system("ls -la /opt/ml/processing/output/")
+    
+    # Count the number of .npy and .pkl files
+    npy_files = glob.glob("/opt/ml/processing/output/*.npy")
+    pkl_files = glob.glob("/opt/ml/processing/output/*.pkl")
+    print(f"Generated {len(npy_files)} .npy files and {len(pkl_files)} .pkl files")
+    
+    print("Processing job completed successfully!")
+
+if __name__ == "__main__":
+    main()
+"""
+    
+    # Write the script to a local file
+    processing_script_path = "processing_script.py"
+    with open(processing_script_path, "w") as f:
+        f.write(processing_script)
+    
+    # Upload the script to S3
+    script_s3_key = f"code/{job_name}/processing_script.py"
     s3 = boto3.client('s3')
-    s3.upload_file(code_path, bucket, code_prefix)
-    
-    # Build command
-    command = [
-        "python", "scripts/processing_script.py",
-        f"--max-samples", str(max_samples),
-        f"--aug-factor", str(aug_factor),
-        f"--s3-output-path", s3_output_path
-    ]
-    
-    if no_augmentation:
-        command.append("--no-augmentation")
+    s3.upload_file(processing_script_path, bucket, script_s3_key)
     
     # Create processing job
     response = sagemaker.create_processing_job(
@@ -76,17 +120,17 @@ def launch_processing_job(
             }
         },
         StoppingCondition={
-            "MaxRuntimeInSeconds": 172800  # 48 hours for the full dataset
+            "MaxRuntimeInSeconds": 172800  # 48 hours
         },
         AppSpecification={
             "ImageUri": f"{boto3.client('sts').get_caller_identity().get('Account')}.dkr.ecr.{boto3.session.Session().region_name}.amazonaws.com/sagemaker-pytorch:1.7.1-cpu-py3",
-            "ContainerEntrypoint": command
+            "ContainerEntrypoint": ["python3", "/opt/ml/processing/input/code/processing_script.py"]
         },
         ProcessingInputs=[
             {
                 "InputName": "code",
                 "S3Input": {
-                    "S3Uri": f"s3://{bucket}/{code_prefix}",
+                    "S3Uri": f"s3://{bucket}/{script_s3_key}",
                     "LocalPath": "/opt/ml/processing/input/code",
                     "S3DataType": "S3Prefix",
                     "S3InputMode": "File",
@@ -100,7 +144,10 @@ def launch_processing_job(
         },
         RoleArn=role_arn,
         Environment={
-            "PYTHONPATH": "/opt/ml/processing/input/code"
+            "MAX_SAMPLES": str(max_samples),
+            "NO_AUGMENTATION": "true" if no_augmentation else "false",
+            "AUG_FACTOR": str(aug_factor),
+            "REPOSITORY_URL": "https://github.com/yourusername/yourrepo.git"  # Replace with your GitHub repo URL
         }
     )
     
@@ -114,40 +161,11 @@ def launch_processing_job(
         waiter.wait(ProcessingJobName=job_name)
         
         # Check job status
-        job_status = sagemaker.describe_processing_job(ProcessingJobName=job_name)['ProcessingJobStatus']
-        if job_status == 'Completed':
-            print(f"Processing job {job_name} completed successfully!")
-        else:
-            print(f"Processing job {job_name} failed or stopped: {job_status}")
-            
-            # Get failure reason if available
-            if 'FailureReason' in job_status:
-                print(f"Failure reason: {job_status['FailureReason']}")
+        job_info = sagemaker.describe_processing_job(ProcessingJobName=job_name)
+        job_status = job_info['ProcessingJobStatus']
+        print(f"Processing job {job_name} finished with status: {job_status}")
+        
+        if job_status != 'Completed':
+            print(f"Job failed: {job_info.get('FailureReason', 'No failure reason provided')}")
     
     return job_name
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Launch SageMaker Processing Job for MS-COCO dataset')
-    parser.add_argument('--role-arn', required=True, help='SageMaker execution role ARN')
-    parser.add_argument('--bucket', required=True, help='S3 bucket for processed data')
-    parser.add_argument('--prefix', default='mscoco_processed', help='S3 prefix for processed data')
-    parser.add_argument('--max-samples', type=int, default=-1, help='Max samples (-1 for all)')
-    parser.add_argument('--no-augmentation', action='store_true', help='Disable augmentation')
-    parser.add_argument('--aug-factor', type=int, default=2, help='Augmentation factor')
-    parser.add_argument('--instance-type', default='ml.m5.24xlarge', help='Instance type')
-    parser.add_argument('--volume-size', type=int, default=500, help='EBS volume size in GB')
-    parser.add_argument('--wait', action='store_true', help='Wait for job to complete')
-    
-    args = parser.parse_args()
-    
-    launch_processing_job(
-        role_arn=args.role_arn,
-        bucket=args.bucket,
-        prefix=args.prefix,
-        max_samples=args.max_samples,
-        no_augmentation=args.no_augmentation,
-        aug_factor=args.aug_factor,
-        instance_type=args.instance_type,
-        volume_size=args.volume_size,
-        wait=args.wait
-    )
