@@ -29,79 +29,32 @@ phases:
   build:
     commands:
       # Install specific dependencies for data processing
-      - echo "Installing data processing dependencies..."
-      - pip install torch==1.7.1 torchvision==0.8.2 clip-by-openai fiftyone matplotlib tqdm pandas pillow numpy ftfy regex
-      
-      # Create upload script
-      - |
-        cat > upload_data.py << EOF
-        import boto3
-        import os
-        import argparse
-        import sys
-        
-        def upload_data_to_s3(local_dir, bucket, prefix):
-            s3 = boto3.client('s3')
-            
-            print(f"Checking directory: {local_dir}")
-            if not os.path.exists(local_dir):
-                print(f"ERROR: Directory {local_dir} does not exist!")
-                return False
-                
-            files = os.listdir(local_dir)
-            print(f"Files in directory ({len(files)} total): {files}")
-            
-            upload_count = 0
-            for filename in files:
-                if filename.endswith('.npy') or filename.endswith('.pkl'):
-                    local_path = os.path.join(local_dir, filename)
-                    s3_key = f"{prefix}/{filename}"
-                    
-                    print(f"Uploading {local_path} to s3://{bucket}/{s3_key}")
-                    try:
-                        s3.upload_file(local_path, bucket, s3_key)
-                        upload_count += 1
-                        print(f"Successfully uploaded {filename}")
-                    except Exception as e:
-                        print(f"ERROR uploading {filename}: {str(e)}")
-            
-            print(f"Upload complete. Uploaded {upload_count} files.")
-            return upload_count > 0
-        
-        if __name__ == "__main__":
-            parser = argparse.ArgumentParser()
-            parser.add_argument("--local-dir", required=True, help="Local directory with processed data")
-            parser.add_argument("--bucket", required=True, help="S3 bucket name")
-            parser.add_argument("--prefix", default="mscoco_processed", help="S3 prefix")
-            
-            args = parser.parse_args()
-            success = upload_data_to_s3(args.local_dir, args.bucket, args.prefix)
-            if not success:
-                print("WARNING: No files were uploaded!")
-        EOF
-      
+      - echo "Checking script files..."
+      - ls -la scripts/
       # Conditionally process and upload data
       - |
         if [ "$UPLOAD_DATA" = "true" ]; then
-          echo "Starting data processing and upload..."
+          echo "Creating SageMaker Processing Job for data processing..."
+          # Install dependencies for launching the job
+          pip install boto3 sagemaker
           
-          # Run data processing pipeline
-          cd data_processing
-          echo "Running data processing pipeline..."
-          # Use a moderate sample size - adjust as needed for your instance
-          python data_processing_pipeline.py --max_samples -1
-          cd ..
+          # Copy processing script to scripts directory
+          cp processing_script.py scripts/
           
-          # Upload processed data to S3
-          echo "Uploading processed data to S3..."
-          python upload_data.py --local-dir data_processing/processed_data --bucket $S3_BUCKET --prefix $S3_DATA_PREFIX
+          # Launch processing job
+          SAGEMAKER_ROLE_ARN=$(aws cloudformation describe-stacks --stack-name ${PROJECT_NAME}-${ENVIRONMENT} --query "Stacks[0].Outputs[?OutputKey=='SageMakerRoleArn'].OutputValue" --output text || echo "arn:aws:iam::${ACCOUNT_ID}:role/${PROJECT_NAME}-${ENVIRONMENT}-sagemaker-role")
           
-          # Update parameter store to avoid reprocessing next time
-          aws ssm put-parameter --name "/moe-gan/${ENVIRONMENT}/upload-data" --type "String" --value "false" --overwrite
+          python scripts/launch_processing_job.py \
+            --role-arn $SAGEMAKER_ROLE_ARN \
+            --bucket $S3_BUCKET \
+            --prefix $S3_DATA_PREFIX \
+            --max-samples -1 \
+            --instance-type ml.m5.4xlarge \
+            --volume-size 300
           
-          echo "Data processing and upload completed."
+          echo "SageMaker Processing Job launched. Data will be uploaded to S3: s3://${S3_BUCKET}/${S3_DATA_PREFIX}/"
         else
-          echo "Skipping data processing. To process data, set the SSM parameter /moe-gan/${ENVIRONMENT}/upload-data to 'true'"
+          echo "Skipping data processing. Use [upload-data] in commit message to trigger."
         fi
   
   post_build:
