@@ -169,3 +169,75 @@ if __name__ == "__main__":
             print(f"Job failed: {job_info.get('FailureReason', 'No failure reason provided')}")
     
     return job_name
+
+
+def main():
+    """Parses command-line arguments and launches the SageMaker processing job."""
+    parser = argparse.ArgumentParser(
+        description="Launch a SageMaker Processing Job for MS-COCO data preprocessing using a script cloned from GitHub."
+    )
+
+    # Required arguments
+    parser.add_argument('--role-arn', type=str, required=True,
+                        help='The ARN of the SageMaker execution role.')
+    parser.add_argument('--bucket', type=str, required=True,
+                        help='The S3 bucket for storing the processing script and receiving output.')
+
+    # Optional arguments with defaults matching the function signature
+    parser.add_argument('--prefix', type=str, default='mscoco_processed',
+                        help='S3 prefix within the bucket for the processed data output (default: mscoco_processed).')
+    parser.add_argument('--max-samples', type=int, default=-1,
+                        help='Maximum number of samples to process. -1 processes all images (default: -1).')
+    parser.add_argument('--no-augmentation', action='store_true',
+                        help='If set, disable data augmentation (default: augmentation is enabled).')
+    parser.add_argument('--aug-factor', type=int, default=2,
+                        help='Factor by which to augment the data if augmentation is enabled (default: 2).')
+    parser.add_argument('--instance-type', type=str, default='ml.m5.24xlarge',
+                        help='The EC2 instance type for the SageMaker Processing Job (default: ml.m5.24xlarge).')
+    parser.add_argument('--volume-size', type=int, default=500,
+                        help='The size in GB of the EBS volume attached to the processing instance (default: 500).')
+    parser.add_argument('--wait', action='store_true',
+                        help='If set, wait for the processing job to complete before exiting the script.')
+
+    args = parser.parse_args()
+
+    # Print the configuration being used - helpful for logs
+    print("--- Launching SageMaker Processing Job ---")
+    print(f"  Role ARN: {args.role_arn}")
+    print(f"  S3 Bucket: {args.bucket}")
+    print(f"  S3 Output Prefix: {args.prefix}")
+    print(f"  Max Samples: {'All' if args.max_samples == -1 else args.max_samples}")
+    print(f"  Data Augmentation: {not args.no_augmentation}")
+    if not args.no_augmentation:
+        print(f"  Augmentation Factor: {args.aug_factor}")
+    print(f"  Instance Type: {args.instance_type}")
+    print(f"  Volume Size (GB): {args.volume_size}")
+    print(f"  Wait for completion: {args.wait}")
+    print("-" * 40) # Separator
+
+    try:
+        # Call the main logic function with the parsed arguments
+        job_name = launch_processing_job(
+            role_arn=args.role_arn,
+            bucket=args.bucket,
+            prefix=args.prefix,
+            max_samples=args.max_samples,
+            no_augmentation=args.no_augmentation,
+            aug_factor=args.aug_factor,
+            instance_type=args.instance_type,
+            volume_size=args.volume_size,
+            wait=args.wait
+        )
+        # The success message is already printed inside launch_processing_job
+        print(f"\nSuccessfully initiated SageMaker Processing Job: {job_name}")
+
+    except Exception as e:
+        print(f"\nERROR: Failed to launch SageMaker Processing Job.", file=sys.stderr)
+        print(f"Error details: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc() # Print the full traceback for detailed debugging
+        sys.exit(1) # Exit with a non-zero status code to indicate failure
+
+# This ensures the main() function is called only when the script is executed directly
+if __name__ == "__main__":
+    main()
