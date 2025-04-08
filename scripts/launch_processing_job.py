@@ -123,7 +123,7 @@ if __name__ == "__main__":
             "MaxRuntimeInSeconds": 172800  # 48 hours
         },
         AppSpecification={
-            "ImageUri": f"{boto3.client('sts').get_caller_identity().get('Account')}.dkr.ecr.{boto3.session.Session().region_name}.amazonaws.com/sagemaker-pytorch:1.7.1-cpu-py3",
+            "ImageUri": "763104351884.dkr.ecr.us-east-1.amazonaws.com/pytorch-processing:1.7.1-cpu-py3",
             "ContainerEntrypoint": ["python3", "/opt/ml/processing/input/code/processing_script.py"]
         },
         ProcessingInputs=[
