@@ -75,7 +75,7 @@ phases:
             with open('best_hyperparameters.json', 'r') as f:
               hp = json.load(f)
             # Set epochs to a higher value for final training
-            hp['epochs'] = '50'  
+            hp['epochs'] = '80'  
             with open('best_hyperparameters.json', 'w') as f:
               json.dump(hp, f)
             "
