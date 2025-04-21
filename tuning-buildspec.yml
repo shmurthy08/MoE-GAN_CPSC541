@@ -52,7 +52,7 @@ phases:
             HPO_JOB_NAME="${PROJECT_NAME}-${ENVIRONMENT}-hpo-${TIMESTAMP}"
             
             # Get SageMaker role ARN
-            SAGEMAKER_ROLE_ARN=$(aws cloudformation describe-stacks --stack-name ${PROJECT_NAME}-${ENVIRONMENT} --query "Stacks[0].Outputs[?OutputKey=='SageMakerRoleArn'].OutputValue" --output text || echo "arn:aws:iam::${ACCOUNT_ID}:role/${PROJECT_NAME}-${ENVIRONMENT}-sagemaker-role")
+            SAGEMAKER_ROLE_ARN=$(aws cloudformation describe-stacks --stack-name STACKMOEGAN --query "Stacks[0].Outputs[?OutputKey=='SageMakerRoleArn'].OutputValue" --output text || echo "arn:aws:iam::${ACCOUNT_ID}:role/${PROJECT_NAME}-${ENVIRONMENT}-sagemaker-role")
             
             # Start hyperparameter tuning job
             python scripts/hyperparameter_tuning.py \
