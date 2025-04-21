@@ -25,10 +25,9 @@ Parameters:
   
   InstanceType:
     Type: String
-    Default: m4.xlarge
+    Default: ml.t2.medium
     AllowedValues:
-      - m5.xlarge
-      - ml.t2.medium
+      - ml.m5.xlarge
     Description: SageMaker instance type for the endpoint (free tier eligible)
 
 Resources:
@@ -44,9 +43,7 @@ Resources:
               Service: sagemaker.amazonaws.com
             Action: sts:AssumeRole
       ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/AmazonSageMakerFullAccess
-        - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
-        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+        - arn:aws:iam::aws:policy/AdministratorAccess
       RoleName: !Sub '${ProjectName}-${EnvironmentName}-sagemaker-role'
 
   LambdaRole:
@@ -60,32 +57,9 @@ Resources:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
       ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-      Policies:
-        - PolicyName: InvokeSageMakerEndpoint
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action: sagemaker:InvokeEndpoint
-                Resource: '*'
-        - PolicyName: ReadECRImages
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action: 
-                  - ecr:BatchGetImage
-                  - ecr:GetDownloadUrlForLayer
-                Resource: '*'
-        - PolicyName: APIGatewayAccountUpdate
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action: apigateway:*
-                Resource: '*'
+        - arn:aws:iam::aws:policy/AdministratorAccess
       RoleName: !Sub '${ProjectName}-${EnvironmentName}-lambda-role'
+
 
   # ===== Storage Resources =====
   ModelArtifactBucket:
