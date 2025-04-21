@@ -30,7 +30,7 @@ def main():
     else:
         # Default hyperparameters
         hyperparameters = {
-            "epochs": "10",
+            "epochs": "10000",
             "batch_size": "32",
             "learning_rate": "0.0002",
             "beta1": "0.5",

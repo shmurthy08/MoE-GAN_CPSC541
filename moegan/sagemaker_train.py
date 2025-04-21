@@ -71,6 +71,20 @@ def download_from_s3(bucket, prefix, local_dir):
     else:
         print(f"No objects found in s3://{bucket}/{prefix}")
 
+# Custom training function with metric reporting for SageMaker
+def custom_train_aurora_gan(train_dataloader, val_dataloader=None, **kwargs):
+    """
+    Wrapper around train_aurora_gan that reports metrics for SageMaker hyperparameter tuning
+    """
+    # Start the training process
+    generator, discriminator = train_aurora_gan(
+        train_dataloader, 
+        val_dataloader=val_dataloader,
+        **kwargs
+    )
+    
+    return generator, discriminator
+
 def main():
     """Main training function for SageMaker environment"""
     print("Starting MoE-GAN training in SageMaker environment")
@@ -117,7 +131,9 @@ def main():
     cloudwatch = boto3.client('cloudwatch', region_name=os.environ.get('AWS_REGION', 'us-west-2'))
     
     def log_metric(name, value, unit='None'):
+        """Log metrics to CloudWatch and standard output for SageMaker to parse"""
         try:
+            # Log to CloudWatch
             cloudwatch.put_metric_data(
                 Namespace='MoEGAN',
                 MetricData=[
@@ -128,6 +144,11 @@ def main():
                     }
                 ]
             )
+            
+            # Log in a format SageMaker can parse for hyperparameter tuning
+            # Format: "[METRIC] metric_name: value"
+            print(f"[METRIC] {name}: {value}")
+            
         except Exception as e:
             print(f"Failed to log metric {name}: {e}")
     
@@ -158,7 +179,19 @@ def main():
         val_dataloader = None
         print("No validation data found, skipping validation")
     
-    # Train model
+    # Define a custom callback function to report metrics during training
+    def metric_callback(epoch, metrics):
+        """Report metrics to SageMaker for hyperparameter tuning"""
+        # Log key metrics for this epoch
+        for metric_name, value in metrics.items():
+            # Convert to string for consistent naming and prefix with 'val_' for validation metrics
+            metric_name_str = f"val_{metric_name}" if 'val' in metric_name else metric_name
+            log_metric(metric_name_str, value)
+            
+        # Return True to continue training
+        return True
+        
+    # Train model with the metric reporting callback
     generator, discriminator = train_aurora_gan(
         train_dataloader, 
         val_dataloader=val_dataloader,
@@ -174,7 +207,8 @@ def main():
         device=device,
         save_dir=save_dir,
         log_interval=50,
-        save_interval=500
+        save_interval=500,
+        metric_callback=metric_callback  # Add the callback for metric reporting
     )
     
     # Save final model 

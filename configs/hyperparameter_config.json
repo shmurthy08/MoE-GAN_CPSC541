@@ -1,0 +1,52 @@
+{
+    "hyperparameter_ranges": {
+      "learning_rate": {
+        "min_value": 0.0001,
+        "max_value": 0.001,
+        "scaling_type": "Logarithmic"
+      },
+      "beta1": {
+        "min_value": 0.5,
+        "max_value": 0.9,
+        "scaling_type": "Linear"
+      },
+      "beta2": {
+        "min_value": 0.9,
+        "max_value": 0.999,
+        "scaling_type": "Linear"
+      },
+      "r1_gamma": {
+        "min_value": 1.0,
+        "max_value": 20.0,
+        "scaling_type": "Linear"
+      },
+      "clip_weight_64": {
+        "min_value": 0.05,
+        "max_value": 0.2,
+        "scaling_type": "Linear"
+      },
+      "clip_weight_32": {
+        "min_value": 0.01,
+        "max_value": 0.1,
+        "scaling_type": "Linear"
+      },
+      "kl_weight": {
+        "min_value": 0.0001,
+        "max_value": 0.01,
+        "scaling_type": "Logarithmic"
+      },
+      "balance_weight": {
+        "min_value": 0.001,
+        "max_value": 0.1,
+        "scaling_type": "Logarithmic"
+      }
+    },
+    "static_hyperparameters": {
+      "epochs": "5",
+      "batch_size": "32"
+    },
+    "objective_metric": {
+      "name": "val_clip_loss",
+      "type": "Minimize"
+    }
+  }

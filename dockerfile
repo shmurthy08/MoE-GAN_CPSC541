@@ -64,6 +64,9 @@ RUN pip install --no-cache-dir \
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
 
+# Copy inference code
+COPY moegan/inference.py /app/
+
 # Create serving script
 RUN echo '#!/usr/bin/env python3\n\
 import sys\n\
