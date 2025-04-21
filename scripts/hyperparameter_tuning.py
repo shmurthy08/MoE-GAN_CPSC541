@@ -100,7 +100,10 @@ def main():
     # Construct the HyperParameterTuningJobConfig
     tuning_job_config = {
         'Strategy': 'Bayesian',
-        'HyperParameterTuningJobObjective': hp_config['objective_metric'],
+        'HyperParameterTuningJobObjective': {
+            'Type': hp_config['objective_metric']['type'],
+            'MetricName': hp_config['objective_metric']['name']
+        },
         'ResourceLimits': {
             'MaxNumberOfTrainingJobs': args.max_jobs,
             'MaxParallelTrainingJobs': args.max_parallel_jobs
@@ -109,8 +112,7 @@ def main():
             'ContinuousParameterRanges': []
         },
         'TrainingJobEarlyStoppingType': 'Auto'
-    }
-    
+    }    
     # Add hyperparameter ranges
     for param_name, param_config in hp_config['hyperparameter_ranges'].items():
         tuning_job_config['ParameterRanges']['ContinuousParameterRanges'].append({
