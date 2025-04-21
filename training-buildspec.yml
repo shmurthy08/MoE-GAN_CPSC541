@@ -7,7 +7,7 @@ phases:
     commands:
       - echo Installing dependencies
       - pip install --upgrade pip
-      - pip install awscli boto3 sagemaker
+      - pip install awscli boto3 sagemaker jq
   
   pre_build:
     commands:
@@ -22,7 +22,7 @@ phases:
       
       # Check training flag
       - |
-        SKIP_TRAINING=$(aws ssm get-parameter --name "/moe-gan/${ENVIRONMENT}/skip-training" --query "Parameter.Value" --output text || echo "true")
+        SKIP_TRAINING=$(aws ssm get-parameter --name "/${PROJECT_NAME}/${ENVIRONMENT}/skip-training" --query "Parameter.Value" --output text || echo "true")
         echo "Skip training: $SKIP_TRAINING"
       
       # Get image URIs from previous stage
@@ -37,6 +37,60 @@ phases:
           TRAINING_IMAGE_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${PROJECT_NAME}-${ENVIRONMENT}-repository:latest-training"
           INFERENCE_IMAGE_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${PROJECT_NAME}-${ENVIRONMENT}-repository:latest-inference"
         fi
+      
+      # NEW SECTION: Fetch best hyperparameters from tuning job
+      - |
+        # Find the latest completed hyperparameter tuning job
+        echo "Looking for completed hyperparameter tuning jobs..."
+        HPO_JOB=$(aws sagemaker list-hyper-parameter-tuning-jobs \
+          --name-contains ${PROJECT_NAME}-${ENVIRONMENT} \
+          --sort-by "CreationTime" \
+          --sort-order "Descending" \
+          --status-equals "Completed" \
+          --query "HyperParameterTuningJobSummaries[0].HyperParameterTuningJobName" \
+          --output text)
+        
+        if [ "$HPO_JOB" != "None" ] && [ ! -z "$HPO_JOB" ]; then
+          echo "Found completed hyperparameter tuning job: $HPO_JOB"
+          
+          # Get the best training job name
+          BEST_TRAINING_JOB=$(aws sagemaker describe-hyper-parameter-tuning-job \
+            --hyper-parameter-tuning-job-name "$HPO_JOB" \
+            --query "BestTrainingJob.TrainingJobName" \
+            --output text)
+          
+          if [ "$BEST_TRAINING_JOB" != "None" ] && [ ! -z "$BEST_TRAINING_JOB" ]; then
+            echo "Best training job: $BEST_TRAINING_JOB"
+            
+            # Create a file to store hyperparameters
+            # Extract hyperparameters from the best training job
+            aws sagemaker describe-training-job \
+              --training-job-name "$BEST_TRAINING_JOB" \
+              --query "HyperParameters" \
+              --output json > best_hyperparameters.json
+            
+            # Set epochs to 50 for the final training
+            python -c "
+            import json
+            with open('best_hyperparameters.json', 'r') as f:
+              hp = json.load(f)
+            # Set epochs to a higher value for final training
+            hp['epochs'] = '50'  
+            with open('best_hyperparameters.json', 'w') as f:
+              json.dump(hp, f)
+            "
+            
+            echo "Using optimal hyperparameters from tuning with 50 epochs for final training"
+            cat best_hyperparameters.json
+            USING_BEST_PARAMS="true"
+          else
+            echo "No best training job found, using default hyperparameters"
+            USING_BEST_PARAMS="false"
+          fi
+        else
+          echo "No completed hyperparameter tuning jobs found, using default hyperparameters"
+          USING_BEST_PARAMS="false"
+        fi
   
   build:
     commands:
@@ -46,12 +100,21 @@ phases:
           echo "Checking if training data exists in S3..."
           if aws s3 ls s3://${S3_BUCKET}/${S3_DATA_PREFIX}/ | grep -q ".npy"; then
             echo "Starting SageMaker training job..."
-            TRAINING_JOB_NAME="${PROJECT_NAME}-${ENVIRONMENT}-training-${COMMIT_HASH:-$(date +%Y%m%d%H%M%S)}"
+            TRAINING_JOB_NAME="${PROJECT_NAME}-${ENVIRONMENT}-final-training-$(date +%Y%m%d%H%M%S)"
             
             # Get SageMaker role ARN
             SAGEMAKER_ROLE_ARN=$(aws cloudformation describe-stacks --stack-name ${PROJECT_NAME}-${ENVIRONMENT} --query "Stacks[0].Outputs[?OutputKey=='SageMakerRoleArn'].OutputValue" --output text || echo "arn:aws:iam::${ACCOUNT_ID}:role/${PROJECT_NAME}-${ENVIRONMENT}-sagemaker-role")
             
-            # Start training job
+            # MODIFIED: Add hyperparameters argument if best params available
+            if [ "$USING_BEST_PARAMS" = "true" ] && [ -f "best_hyperparameters.json" ]; then
+              echo "Using best hyperparameters for training"
+              HYPERPARAMS_ARG="--hyperparameters best_hyperparameters.json"
+            else
+              echo "Using default hyperparameters"
+              HYPERPARAMS_ARG=""
+            fi
+            
+            # Start training job with updated command
             python scripts/start_training_job.py \
               --job-name $TRAINING_JOB_NAME \
               --role-arn $SAGEMAKER_ROLE_ARN \
@@ -60,7 +123,8 @@ phases:
               --prefix training/$TRAINING_JOB_NAME \
               --data-bucket $S3_BUCKET \
               --data-prefix $S3_DATA_PREFIX \
-              --instance-type ml.g4dn.xlarge
+              --instance-type ml.g4dn.xlarge \
+              $HYPERPARAMS_ARG
               
             echo "Training job started: $TRAINING_JOB_NAME"
           else
@@ -79,7 +143,8 @@ phases:
         {
           "TrainingInitiated": "$([[ "$SKIP_TRAINING" = "false" ]] && echo "true" || echo "false")",
           "S3Bucket":"$S3_BUCKET",
-          "S3DataPrefix":"$S3_DATA_PREFIX"
+          "S3DataPrefix":"$S3_DATA_PREFIX",
+          "UsingOptimalHyperparameters": "$USING_BEST_PARAMS"
         }
         EOF
       - echo "Training stage complete."
