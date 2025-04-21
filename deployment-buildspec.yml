@@ -1,0 +1,127 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      python: 3.8
+    commands:
+      - echo Installing dependencies
+      - pip install --upgrade pip
+      - pip install awscli boto3 sagemaker
+  
+  pre_build:
+    commands:
+      # Setup environment variables
+      - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - PROJECT_NAME=$(cat cloudformation.yaml | grep -m 1 'ProjectName' -A 3 | grep 'Default:' | awk '{print $2}')
+      - ENVIRONMENT=$(cat cloudformation.yaml | grep -m 1 'EnvironmentName' -A 3 | grep 'Default:' | awk '{print $2}')
+      
+      # Find latest training job
+      - echo "Finding latest training job..."
+      - LATEST_TRAINING_JOB=$(aws sagemaker list-training-jobs --name-contains ${PROJECT_NAME}-${ENVIRONMENT} --sort-by CreationTime --sort-order Descending --query "TrainingJobSummaries[0].TrainingJobName" --output text)
+      - echo "Latest training job: $LATEST_TRAINING_JOB"
+      
+      # Get model artifacts
+      - |
+        if [ ! -z "$LATEST_TRAINING_JOB" ]; then
+          MODEL_ARTIFACTS=$(aws sagemaker describe-training-job --training-job-name $LATEST_TRAINING_JOB --query 'ModelArtifacts.S3ModelArtifacts' --output text)
+          echo "Model artifacts: $MODEL_ARTIFACTS"
+        else
+          echo "No training jobs found. Skipping deployment."
+          exit 0
+        fi
+      
+      # Get inference image URI
+      - |
+        if [ -f ../BuildOutput/build_output.json ]; then
+          INFERENCE_IMAGE_URI=$(cat ../BuildOutput/build_output.json | jq -r '.InferenceImageUri')
+          echo "Inference image: $INFERENCE_IMAGE_URI"
+        else
+          echo "Using default image URI."
+          INFERENCE_IMAGE_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${PROJECT_NAME}-${ENVIRONMENT}-repository:latest-inference"
+        fi
+  
+  build:
+    commands:
+      - |
+        if [ ! -z "$MODEL_ARTIFACTS" ] && [ ! -z "$INFERENCE_IMAGE_URI" ]; then
+          # Get SageMaker role ARN
+          SAGEMAKER_ROLE_ARN=$(aws cloudformation describe-stacks --stack-name ${PROJECT_NAME}-${ENVIRONMENT} --query "Stacks[0].Outputs[?OutputKey=='SageMakerRoleArn'].OutputValue" --output text || echo "arn:aws:iam::${ACCOUNT_ID}:role/${PROJECT_NAME}-${ENVIRONMENT}-sagemaker-role")
+            
+          # Create or update SageMaker model
+          echo "Creating SageMaker model..."
+          aws sagemaker create-model \
+            --model-name ${PROJECT_NAME}-${ENVIRONMENT}-model \
+            --execution-role-arn $SAGEMAKER_ROLE_ARN \
+            --primary-container "Image=${INFERENCE_IMAGE_URI},ModelDataUrl=${MODEL_ARTIFACTS}" \
+            --tags Key=Project,Value=${PROJECT_NAME}
+          
+          # Create or update endpoint config
+          echo "Creating endpoint configuration..."
+          aws sagemaker create-endpoint-config \
+            --endpoint-config-name ${PROJECT_NAME}-${ENVIRONMENT}-endpoint-config \
+            --production-variants "VariantName=AllTraffic,ModelName=${PROJECT_NAME}-${ENVIRONMENT}-model,InitialInstanceCount=1,InstanceType=ml.g4dn.xlarge" \
+            --tags Key=Project,Value=${PROJECT_NAME}
+          
+          # Check if endpoint exists
+          ENDPOINT_EXISTS=$(aws sagemaker describe-endpoint --endpoint-name ${PROJECT_NAME}-${ENVIRONMENT}-endpoint 2>/dev/null && echo "true" || echo "false")
+          
+          if [ "$ENDPOINT_EXISTS" = "true" ]; then
+            # Update endpoint
+            echo "Updating existing endpoint..."
+            aws sagemaker update-endpoint \
+              --endpoint-name ${PROJECT_NAME}-${ENVIRONMENT}-endpoint \
+              --endpoint-config-name ${PROJECT_NAME}-${ENVIRONMENT}-endpoint-config
+          else
+            # Create endpoint
+            echo "Creating new endpoint..."
+            aws sagemaker create-endpoint \
+              --endpoint-name ${PROJECT_NAME}-${ENVIRONMENT}-endpoint \
+              --endpoint-config-name ${PROJECT_NAME}-${ENVIRONMENT}-endpoint-config \
+              --tags Key=Project,Value=${PROJECT_NAME}
+          fi
+          
+          echo "Deployment initiated. Endpoint will be available at: ${PROJECT_NAME}-${ENVIRONMENT}-endpoint"
+          
+          # Update CloudFormation stack with model artifacts and container info
+          aws cloudformation update-stack \
+            --stack-name ${PROJECT_NAME}-${ENVIRONMENT} \
+            --use-previous-template \
+            --parameters \
+              ParameterKey=ModelArtifactUrl,ParameterValue=$MODEL_ARTIFACTS \
+              ParameterKey=ContainerImage,ParameterValue=$INFERENCE_IMAGE_URI \
+              ParameterKey=ProjectName,UsePreviousValue=true \
+              ParameterKey=EnvironmentName,UsePreviousValue=true \
+            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM
+        else
+          echo "Missing model artifacts or inference image. Skipping deployment."
+        fi
+  
+  post_build:
+    commands:
+      # Create output file
+      - |
+        if [ ! -z "$LATEST_TRAINING_JOB" ] && [ ! -z "$MODEL_ARTIFACTS" ]; then
+          cat > deployment_output.json << EOF
+          {
+            "Deployed": true,
+            "ModelName": "${PROJECT_NAME}-${ENVIRONMENT}-model",
+            "EndpointName": "${PROJECT_NAME}-${ENVIRONMENT}-endpoint",
+            "TrainingJob": "$LATEST_TRAINING_JOB",
+            "ModelArtifacts": "$MODEL_ARTIFACTS"
+          }
+          EOF
+        else
+          cat > deployment_output.json << EOF
+          {
+            "Deployed": false,
+            "Reason": "No model artifacts or deployment failed."
+          }
+          EOF
+        fi
+      - echo "Deployment stage complete."
+
+artifacts:
+  files:
+    - deployment_output.json
+  discard-paths: yes

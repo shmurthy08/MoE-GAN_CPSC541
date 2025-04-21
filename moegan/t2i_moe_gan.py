@@ -871,16 +871,38 @@ from tqdm import tqdm
 def train_aurora_gan(
     dataloader, val_dataloader=None,
     num_epochs=50, lr=0.0002, beta1=0.5, beta2=0.999,
-    r1_gamma=10.0, # <-- Add R1 hyperparameter
-    clip_weight_64=0.1, # <-- Add CLIP weight for 64x64
-    clip_weight_32=0.05, # <-- Add CLIP weight for 32x32 (example, adjust as needed)
-    kl_weight=0.001, # Weight for Bayesian Router KL loss
-    balance_weight = 0.01, # Weight for MoE balance loss
+    r1_gamma=10.0,
+    clip_weight_64=0.1,
+    clip_weight_32=0.05,
+    kl_weight=0.001,
+    balance_weight = 0.01,
     device=DEVICE, save_dir='./aurora_checkpoints',
-    log_interval=10, save_interval=1000
+    log_interval=10, save_interval=1000,
+    metric_callback=None  # Add metric callback parameter
 ):
     """
     Train the Aurora GAN model with R1, Matching-Aware, Multi-level CLIP loss.
+    
+    Args:
+        dataloader: Training data loader
+        val_dataloader: Optional validation data loader
+        num_epochs: Number of training epochs
+        lr: Learning rate
+        beta1: Beta1 for Adam optimizer
+        beta2: Beta2 for Adam optimizer
+        r1_gamma: R1 regularization weight
+        clip_weight_64: CLIP loss weight for 64x64 resolution
+        clip_weight_32: CLIP loss weight for 32x32 resolution
+        kl_weight: KL divergence loss weight
+        balance_weight: MoE balance loss weight
+        device: Device to train on
+        save_dir: Directory to save checkpoints
+        log_interval: How often to log metrics
+        save_interval: How often to save checkpoints
+        metric_callback: Optional callback function for reporting metrics for hyperparameter tuning
+        
+    Returns:
+        Trained generator and discriminator models
     """
     # Create save directory
     os.makedirs(save_dir, exist_ok=True)
@@ -937,10 +959,6 @@ def train_aurora_gan(
             )
             grad_penalty = grad_real.view(grad_real.size(0), -1).norm(2, dim=1) ** 2
             r1_loss = (r1_gamma / 2) * grad_penalty.mean() # Divide gamma by 2, common practice
-
-            # Detach real images after R1 calculation if needed elsewhere,
-            # but it's only used for discriminator loss here.
-            # real_images = real_images.detach() # Not strictly necessary here
 
             # --- Fake images ---
             with torch.no_grad():
@@ -1042,7 +1060,9 @@ def train_aurora_gan(
 
             val_g_loss_gan = 0
             val_d_loss_gan = 0
-            val_clip_loss = 0 # Simplified validation loss tracking
+            val_clip_loss_64 = 0
+            val_clip_loss_32 = 0
+            val_samples = 0
 
             print("Running validation...")
             val_pbar = tqdm(val_dataloader, desc=f"Validation Epoch {epoch+1}")
@@ -1050,6 +1070,7 @@ def train_aurora_gan(
             with torch.no_grad():
                 for val_real_images, val_text_embeddings in val_pbar:
                     val_batch_size = val_real_images.size(0)
+                    val_samples += val_batch_size
 
                     val_real_images = val_real_images.to(device)
                     val_text_embeddings = val_text_embeddings.to(device)
@@ -1060,7 +1081,7 @@ def train_aurora_gan(
 
                     # Fake images - Adjust call based on modified generator forward
                     # We only need final image and KL for validation loss calculation usually
-                    val_fake_images_64, _, val_kl_loss = generator(val_z, val_text_embeddings, return_intermediate=True) # Get KL loss
+                    val_fake_images_64, val_fake_images_32, val_kl_loss = generator(val_z, val_text_embeddings, return_intermediate=True) # Get KL loss
 
                     # Fake images prediction
                     val_fake_pred = discriminator(val_fake_images_64, val_text_embeddings)
@@ -1073,28 +1094,48 @@ def train_aurora_gan(
                     # Losses
                     batch_d_loss = gan_loss.discriminator_loss(val_real_pred, val_fake_pred, val_mismatched_pred).item()
                     batch_g_loss = gan_loss.generator_loss(val_fake_pred, val_kl_loss, kl_weight=kl_weight).item() # Only GAN + KL part for validation G loss
-                    batch_clip_loss = gan_loss.compute_clip_loss(val_fake_images_64, val_text_embeddings).item()
+                    batch_clip_loss_64 = gan_loss.compute_clip_loss(val_fake_images_64, val_text_embeddings).item()
+                    batch_clip_loss_32 = gan_loss.compute_clip_loss(val_fake_images_32, val_text_embeddings).item()
 
-                    val_d_loss_gan += batch_d_loss
-                    val_g_loss_gan += batch_g_loss
-                    val_clip_loss += batch_clip_loss
-
+                    val_d_loss_gan += batch_d_loss * val_batch_size
+                    val_g_loss_gan += batch_g_loss * val_batch_size
+                    val_clip_loss_64 += batch_clip_loss_64 * val_batch_size
+                    val_clip_loss_32 += batch_clip_loss_32 * val_batch_size
 
                     val_pbar.set_postfix({
                         'D_loss': f'{batch_d_loss:.4f}',
                         'G_loss': f'{batch_g_loss:.4f}',
-                        'Clip': f'{batch_clip_loss:.4f}'
+                        'Clip64': f'{batch_clip_loss_64:.4f}',
+                        'Clip32': f'{batch_clip_loss_32:.4f}'
                     })
 
             val_pbar.close()
 
             # Average losses
-            val_d_loss_gan /= len(val_dataloader)
-            val_g_loss_gan /= len(val_dataloader)
-            val_clip_loss /= len(val_dataloader)
+            if val_samples > 0:
+                val_d_loss_gan /= val_samples
+                val_g_loss_gan /= val_samples
+                val_clip_loss_64 /= val_samples
+                val_clip_loss_32 /= val_samples
 
+                # Collect metrics for reporting
+                val_metrics = {
+                    'val_d_loss': val_d_loss_gan,
+                    'val_g_loss': val_g_loss_gan,
+                    'val_clip_loss_64': val_clip_loss_64,
+                    'val_clip_loss_32': val_clip_loss_32,
+                    'val_clip_loss': val_clip_loss_64  # Primary metric for HPO
+                }
 
-            print(f"Validation Results - D_loss: {val_d_loss_gan:.4f}, G_loss: {val_g_loss_gan:.4f}, Clip_Loss: {val_clip_loss:.4f}")
+                print(f"Validation Results - D_loss: {val_d_loss_gan:.4f}, G_loss: {val_g_loss_gan:.4f}, "
+                     f"Clip_Loss_64: {val_clip_loss_64:.4f}, Clip_Loss_32: {val_clip_loss_32:.4f}")
+                
+                # Call the metric callback if provided
+                if metric_callback:
+                    if not metric_callback(epoch, val_metrics):
+                        # If the callback returns False, stop training
+                        print("Early stopping triggered by metric callback")
+                        break
 
             generator.train()
             discriminator.train()
@@ -1124,6 +1165,7 @@ def train_aurora_gan(
     print(f"Final model saved to {final_save_path}")
 
     return generator, discriminator
+
 
 def sample_aurora_gan(generator, text_prompt, num_samples=1, truncation_psi=0.7, device=DEVICE):
     """

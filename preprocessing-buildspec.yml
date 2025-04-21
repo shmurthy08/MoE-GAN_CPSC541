@@ -23,7 +23,7 @@ phases:
       
       # Check preprocessing flag
       - |
-        UPLOAD_DATA=$(aws ssm get-parameter --name "/moe-gan/${ENVIRONMENT}/upload-data" --query "Parameter.Value" --output text || echo "false")
+        UPLOAD_DATA=$(aws ssm get-parameter --name "/${PROJECT_NAME}/${ENVIRONMENT}/upload-data" --query "Parameter.Value" --output text || echo "false")
         echo "Upload data: $UPLOAD_DATA"
   
   build:

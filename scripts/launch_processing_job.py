@@ -73,7 +73,7 @@ def main():
     print("Running data processing pipeline...")
     max_samples = os.environ.get('MAX_SAMPLES', '-1')
     no_augmentation = os.environ.get('NO_AUGMENTATION', 'false')
-    aug_factor = os.environ.get('AUG_FACTOR', '2')
+    aug_factor = os.environ.get('AUG_FACTOR', '0')
     
     cmd = f"cd data_processing && python data_processing_pipeline.py --max_samples {max_samples}"
     if no_augmentation.lower() == 'true':
