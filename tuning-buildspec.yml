@@ -66,7 +66,8 @@ phases:
               --instance-type ml.g4dn.xlarge \
               --max-jobs 5 \
               --max-parallel-jobs 2 \
-              --config configs/hyperparameter_config.json
+              --config configs/hyperparameter_config.json \
+              --wait
               
             echo "Hyperparameter tuning job started: $HPO_JOB_NAME"
             

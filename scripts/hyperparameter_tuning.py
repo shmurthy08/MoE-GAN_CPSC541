@@ -19,6 +19,8 @@ def main():
     parser.add_argument('--max-jobs', type=int, default=10, help='Maximum number of training jobs')
     parser.add_argument('--max-parallel-jobs', type=int, default=2, help='Maximum parallel training jobs')
     parser.add_argument('--config', help='Path to hyperparameter configuration JSON file')
+    parser.add_argument('--wait', action='store_true',
+                        help='If set, wait for the tuning job to complete before exiting the script.')
     
     args = parser.parse_args()
     
@@ -168,6 +170,20 @@ def main():
     print(f"Hyperparameter tuning job started: {response['HyperParameterTuningJobArn']}")
     print(f"Job will run up to {args.max_jobs} training jobs, with {args.max_parallel_jobs} in parallel")
     print(f"Job status can be monitored in the SageMaker console or via the AWS CLI/SDK")
+    
+    # Wait for job to complete if requested
+    if args.wait:
+        print("Waiting for hyperparameter tuning job to complete...")
+        waiter = sagemaker.get_waiter('hyper_parameter_tuning_job_completed_or_stopped')
+        waiter.wait(HyperParameterTuningJobName=args.job_name)
+        
+        # Check job status
+        job_info = sagemaker.describe_hyper_parameter_tuning_job(HyperParameterTuningJobName=args.job_name)
+        job_status = job_info['HyperParameterTuningJobStatus']
+        print(f"Hyperparameter tuning job {args.job_name} finished with status: {job_status}")
+        
+        if job_status != 'Completed':
+            print(f"Job failed or stopped: {job_info.get('FailureReason', 'No failure reason provided')}")
     
     return response
 
