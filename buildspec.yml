@@ -55,6 +55,8 @@ phases:
           echo "Pushing to ECR"
           docker push ${ECR_REPOSITORY_URI}:${IMAGE_TAG}-training
           docker push ${ECR_REPOSITORY_URI}:${IMAGE_TAG}-inference
+          docker push ${ECR_REPOSITORY_URI}:latest-training
+          docker push ${ECR_REPOSITORY_URI}:latest-inference
         else
           echo "Skipping push to ECR since build was skipped"
         fi
