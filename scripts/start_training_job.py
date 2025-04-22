@@ -30,7 +30,7 @@ def main():
     else:
         # Default hyperparameters
         hyperparameters = {
-            "epochs": "10000",
+            "epochs": "200",
             "batch_size": "32",
             "learning_rate": "0.0002",
             "beta1": "0.5",
@@ -69,7 +69,7 @@ def main():
             'VolumeSizeInGB': 30  # Increased size for ML datasets
         },
         StoppingCondition={
-            'MaxRuntimeInSeconds': 86400  # 24 hours max runtime
+            'MaxRuntimeInSeconds': 864000  
         },
         HyperParameters=hyperparameters,
         Environment=environment,
