@@ -67,7 +67,7 @@ phases:
               --max-jobs 5 \
               --max-parallel-jobs 2 \
               --config configs/hyperparameter_config.json \
-              --wait
+              --wait || exit 1  # Exit with error code if job fails
               
             echo "Hyperparameter tuning job started: $HPO_JOB_NAME"
             
@@ -83,9 +83,17 @@ phases:
         else
           echo "Hyperparameter tuning skipped as indicated by SSM parameter"
         fi
+        python scripts/get_best_model.py \
+          --tuning-job-name $HPO_JOB_NAME \
+          --output-file best_model_info.json || exit 1
   
   post_build:
     commands:
+      - |
+        BEST_MODEL_INFO="{}"
+        if [ -f best_model_info.json ]; then
+          BEST_MODEL_INFO=$(cat best_model_info.json)
+        fi
       # Create output file
       - |
         cat > tuning_output.json << EOF

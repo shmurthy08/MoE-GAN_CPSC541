@@ -126,7 +126,7 @@ phases:
               --data-prefix $S3_DATA_PREFIX \
               --instance-type ml.g4dn.xlarge \
               $HYPERPARAMS_ARG \
-              --wait
+              --wait || exit 1  # Exit with error code if job fails
               
             echo "Training job started: $TRAINING_JOB_NAME"
           else
