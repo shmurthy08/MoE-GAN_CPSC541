@@ -28,6 +28,8 @@ Parameters:
     Default: ml.t2.medium
     AllowedValues:
       - ml.m5.xlarge
+      - ml.t2.medium
+      - ml.g4dn.xlarge
     Description: SageMaker instance type for the endpoint (free tier eligible)
 
 Resources:
