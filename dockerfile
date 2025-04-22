@@ -5,6 +5,8 @@ FROM python:3.8-slim as base
 
 WORKDIR /app
 
+RUN pip install --no-cache-dir torch>=1.9.0 torchvision torchaudio
+
 # Install system dependencies
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
