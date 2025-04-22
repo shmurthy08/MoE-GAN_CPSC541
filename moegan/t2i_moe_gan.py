@@ -36,7 +36,7 @@ def get_clip_model():
     
     if _clip_model is None:
         logger.info(f"\nLoading CLIP model {CLIP_MODEL_TYPE}")
-        _clip_model, _clip_preprocess = clip.load(CLIP_MODEL_TYPE, device=DEVICE)
+        _clip_model, _clip_preprocess = clip.load(CLIP_MODEL_TYPE, device=DEVICE, jit=False)
         _clip_model.eval()
     
     return _clip_model, _clip_preprocess

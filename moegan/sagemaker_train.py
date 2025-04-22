@@ -17,16 +17,28 @@ MODEL_PATH = '/opt/ml/model'
 OUTPUT_PATH = '/opt/ml/output'
 PARAM_PATH = '/opt/ml/input/config/hyperparameters.json'
 
+# Debug import issues by logging environment information
+print(f"Current working directory: {os.getcwd()}")
+print(f"Python path at start: {sys.path}")
+print(f"Directory contents: {os.listdir('.')}")
+if os.path.exists('..'):
+    print(f"Parent directory contents: {os.listdir('..')}")
+if os.path.exists('/app'):
+    print(f"/app directory contents: {os.listdir('/app')}")
+
 # Import from data processing
 try:
     from data_processing.data_processing_pipeline import ProcessedMSCOCODataset
 except ImportError:
     print("Warning: Could not import ProcessedMSCOCODataset directly")
     # Try alternative import
-    sys.path.append(os.path.abspath('..'))
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    sys.path.append(base_dir)
     try:
         from data_processing.data_processing_pipeline import ProcessedMSCOCODataset
     except ImportError:
+        print("Critical error: Cannot import data processing module")
+        print(f"Current sys.path: {sys.path}")
         print("Critical error: Cannot import data processing module")
         sys.exit(1)
 

@@ -19,9 +19,11 @@ RUN apt-get update && \
 # Copy and install Python dependencies
 COPY requirements.txt . 
 RUN pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir \
-        clip-by-openai \
-        tensorboard
+    pip install --no-cache-dir tensorboard
+
+# Install CLIP without dependencies to avoid downgrading PyTorch
+RUN pip install --no-deps git+https://github.com/openai/CLIP.git && \
+    pip install --no-deps ftfy regex tqdm
 
 # Copy common code files
 COPY moegan/*.py /app/moegan/
@@ -32,7 +34,7 @@ FROM base as training
 
 # Install training-specific dependencies
 RUN pip install --no-cache-dir \
-    ftfy regex tqdm boto3 sagemaker
+    boto3 sagemaker
 
 # Copy training-specific files
 COPY scripts/*.py /app/scripts/
@@ -40,6 +42,9 @@ COPY scripts/*.py /app/scripts/
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
+
+ENV PYTHONPATH=/app:/app/moegan:/app/data_processing
+
 
 # Set entry point
 ENTRYPOINT ["python", "/app/moegan/sagemaker_train.py"]
