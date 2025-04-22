@@ -1,11 +1,9 @@
 # Multi-stage Dockerfile for MoE-GAN
 
 # Base stage with common dependencies
-FROM python:3.8-slim as base
+FROM pytorch/pytorch:1.12.1-cuda11.3-cudnn8-runtime as base
 
 WORKDIR /app
-
-RUN pip install --no-cache-dir torch>=1.9.0 torchvision torchaudio
 
 # Install system dependencies
 RUN apt-get update && \
@@ -23,7 +21,6 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt && \
     pip install --no-cache-dir \
         clip-by-openai \
-        fiftyone \
         tensorboard
 
 # Copy common code files
