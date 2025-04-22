@@ -42,9 +42,8 @@ COPY scripts/*.py /app/scripts/
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
 
-# Copy SageMaker training entry point
-COPY moegan/sagemaker_train.py /app/
-ENTRYPOINT ["python", "/app/sagemaker_train.py"]
+# Set entry point
+ENTRYPOINT ["python", "/app/moegan/sagemaker_train.py"]
 
 # Inference stage
 FROM base as inference
@@ -57,22 +56,16 @@ RUN pip install --no-cache-dir \
     boto3 \
     sagemaker-inference
 
-# Copy inference code
-# COPY moegan/inference.py /app/
-
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
-
-# Copy inference code
-COPY moegan/inference.py /app/
 
 # Create serving script
 RUN echo '#!/usr/bin/env python3\n\
 import sys\n\
 import os\n\
 from sagemaker_inference import model_server\n\
-model_server.start_model_server(handler_service="/app/inference.py")' > /app/serve && \
+model_server.start_model_server(handler_service="/app/moegan/inference.py")' > /app/serve && \
 chmod +x /app/serve
 
 ENTRYPOINT ["/app/serve"]

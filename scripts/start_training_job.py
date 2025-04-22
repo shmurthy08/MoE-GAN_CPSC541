@@ -16,6 +16,8 @@ def main():
     parser.add_argument('--hyperparameters', help='Path to hyperparameters JSON file')
     parser.add_argument('--data-bucket', help='S3 bucket containing training data')
     parser.add_argument('--data-prefix', default='mscoco_processed', help='S3 prefix for training data')
+    parser.add_argument('--wait', action='store_true',
+                        help='If set, wait for the training job to complete before exiting the script.')
     
     args = parser.parse_args()
     
@@ -83,21 +85,19 @@ def main():
     
     print(f"Training job started: {response['TrainingJobArn']}")
     
-    # Wait for job to complete if desired
-    wait_for_completion = os.environ.get('WAIT_FOR_COMPLETION', 'false').lower() == 'true'
-    if wait_for_completion:
+    # Wait for job to complete if requested
+    if args.wait:
         print("Waiting for training job to complete...")
+        waiter = sagemaker.get_waiter('training_job_completed_or_stopped')
+        waiter.wait(TrainingJobName=args.job_name)
         
-        while True:
-            status = sagemaker.describe_training_job(TrainingJobName=args.job_name)['TrainingJobStatus']
-            print(f"Current status: {status}")
-            
-            if status in ['Completed', 'Failed', 'Stopped']:
-                break
-                
-            time.sleep(60)  # Check every minute
-            
-        print(f"Training job finished with status: {status}")
+        # Check job status
+        job_info = sagemaker.describe_training_job(TrainingJobName=args.job_name)
+        job_status = job_info['TrainingJobStatus']
+        print(f"Training job {args.job_name} finished with status: {job_status}")
+        
+        if job_status != 'Completed':
+            print(f"Job failed or stopped: {job_info.get('FailureReason', 'No failure reason provided')}")
     
     return response
 
