@@ -29,6 +29,39 @@ RUN pip install --no-deps git+https://github.com/openai/CLIP.git && \
 COPY moegan/*.py /app/moegan/
 COPY data_processing/*.py /app/data_processing/
 
+# Create __init__.py files to make directories proper Python packages
+RUN touch /app/moegan/__init__.py
+RUN touch /app/data_processing/__init__.py
+
+# Create a debug script to help diagnose import issues
+RUN echo '#!/usr/bin/env python3\n\
+import sys\n\
+import os\n\
+import importlib\n\
+\n\
+print("Debug: Checking Python environment")\n\
+print(f"Python version: {sys.version}")\n\
+print(f"Current directory: {os.getcwd()}")\n\
+print(f"Directory contents: {os.listdir()}")\n\
+print(f"PYTHONPATH: {os.environ.get(\"PYTHONPATH\", \"Not set\")}")\n\
+print(f"sys.path: {sys.path}")\n\
+\n\
+# Check data_processing directory\n\
+print(f"data_processing directory contents: {os.listdir(\"/app/data_processing\") if os.path.exists(\"/app/data_processing\") else \"Directory not found\"}")\n\
+\n\
+# Try to find the ProcessedMSCOCODataset class\n\
+for root, dirs, files in os.walk(\"/app\"):\n\
+    for file in files:\n\
+        if file.endswith(\".py\"):\n\
+            with open(os.path.join(root, file), \"r\") as f:\n\
+                content = f.read()\n\
+                if \"ProcessedMSCOCODataset\" in content:\n\
+                    print(f"Found ProcessedMSCOCODataset in {os.path.join(root, file)}")\n\
+\n\
+print("End of debug information")\n\
+' > /app/debug_imports.py
+RUN chmod +x /app/debug_imports.py
+
 # Training stage
 FROM base as training
 
@@ -41,13 +74,11 @@ COPY scripts/*.py /app/scripts/
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
-ENV PYTHONPATH=/app
-
+# Ensure Python can find all modules by setting a comprehensive PYTHONPATH
 ENV PYTHONPATH=/app:/app/moegan:/app/data_processing
 
-
-# Set entry point
-ENTRYPOINT ["python", "/app/moegan/sagemaker_train.py"]
+# Modify the entrypoint to run our debug script first
+ENTRYPOINT ["sh", "-c", "python /app/debug_imports.py && python /app/moegan/sagemaker_train.py"]
 
 # Inference stage
 FROM base as inference
