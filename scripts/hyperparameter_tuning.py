@@ -24,8 +24,9 @@ def main():
     
     # Generate job name if not provided
     if not args.job_name:
-        timestamp = datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
-        args.job_name = f"moe-gan-hpo-{timestamp}"
+        timestamp = datetime.now().strftime('%y%m%d%H%M')  # Shorter timestamp
+        # Ensure the job name is 32 characters or less
+        args.job_name = f"gan-hpo-{timestamp}"[:32]
     
     # Load hyperparameter configuration from file if provided
     if args.config and os.path.exists(args.config):

@@ -51,7 +51,7 @@ phases:
           # Create or update SageMaker model
           echo "Creating SageMaker model..."
           aws sagemaker create-model \
-            --model-name ${PROJECT_NAME}-${ENVIRONMENT}-model \
+            --model-name gan-model-${ENVIRONMENT} \
             --execution-role-arn $SAGEMAKER_ROLE_ARN \
             --primary-container "Image=${INFERENCE_IMAGE_URI},ModelDataUrl=${MODEL_ARTIFACTS}" \
             --tags Key=Project,Value=${PROJECT_NAME}
@@ -59,25 +59,25 @@ phases:
           # Create or update endpoint config
           echo "Creating endpoint configuration..."
           aws sagemaker create-endpoint-config \
-            --endpoint-config-name ${PROJECT_NAME}-${ENVIRONMENT}-endpoint-config \
+            --endpoint-config-name gan-ep-config-${ENVIRONMENT} \
             --production-variants "VariantName=AllTraffic,ModelName=${PROJECT_NAME}-${ENVIRONMENT}-model,InitialInstanceCount=1,InstanceType=ml.g4dn.xlarge" \
             --tags Key=Project,Value=${PROJECT_NAME}
           
           # Check if endpoint exists
-          ENDPOINT_EXISTS=$(aws sagemaker describe-endpoint --endpoint-name ${PROJECT_NAME}-${ENVIRONMENT}-endpoint 2>/dev/null && echo "true" || echo "false")
+          ENDPOINT_EXISTS=$(aws sagemaker describe-endpoint --endpoint-name $gan-ep-${ENVIRONMENT} 2>/dev/null && echo "true" || echo "false")
           
           if [ "$ENDPOINT_EXISTS" = "true" ]; then
             # Update endpoint
             echo "Updating existing endpoint..."
-            aws sagemaker update-endpoint \
-              --endpoint-name ${PROJECT_NAME}-${ENVIRONMENT}-endpoint \
-              --endpoint-config-name ${PROJECT_NAME}-${ENVIRONMENT}-endpoint-config
+            aws sagemaker create-endpoint \
+              --endpoint-name gan-ep-${ENVIRONMENT} \
+              --endpoint-config-name gan-ep-config-${ENVIRONMENT} 
           else
             # Create endpoint
             echo "Creating new endpoint..."
             aws sagemaker create-endpoint \
-              --endpoint-name ${PROJECT_NAME}-${ENVIRONMENT}-endpoint \
-              --endpoint-config-name ${PROJECT_NAME}-${ENVIRONMENT}-endpoint-config \
+              --endpoint-name gan-ep-${ENVIRONMENT} \
+              --endpoint-config-name gan-ep-config-${ENVIRONMENT} \
               --tags Key=Project,Value=${PROJECT_NAME}
           fi
           
