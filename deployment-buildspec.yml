@@ -60,11 +60,12 @@ phases:
           echo "Creating endpoint configuration..."
           aws sagemaker create-endpoint-config \
             --endpoint-config-name gan-ep-config-${ENVIRONMENT} \
-            --production-variants "VariantName=AllTraffic,ModelName=${PROJECT_NAME}-${ENVIRONMENT}-model,InitialInstanceCount=1,InstanceType=ml.g4dn.xlarge" \
+              --production-variants "VariantName=AllTraffic,ModelName=gan-model-${ENVIRONMENT},InitialInstanceCount=1,InstanceType=ml.g4dn.xlarge" \
             --tags Key=Project,Value=${PROJECT_NAME}
           
           # Check if endpoint exists
-          ENDPOINT_EXISTS=$(aws sagemaker describe-endpoint --endpoint-name $gan-ep-${ENVIRONMENT} 2>/dev/null && echo "true" || echo "false")
+          ENDPOINT_EXISTS=$(aws sagemaker describe-endpoint --endpoint-name gan-ep-${ENVIRONMENT} 2>/dev/null && echo "true" || echo "false")
+
           
           if [ "$ENDPOINT_EXISTS" = "true" ]; then
             # Update endpoint
@@ -105,8 +106,8 @@ phases:
           cat > deployment_output.json << EOF
           {
             "Deployed": true,
-            "ModelName": "${PROJECT_NAME}-${ENVIRONMENT}-model",
-            "EndpointName": "${PROJECT_NAME}-${ENVIRONMENT}-endpoint",
+            "ModelName": "gan-model-${ENVIRONMENT}",
+            "EndpointName": "gan-ep-${ENVIRONMENT}",
             "TrainingJob": "$LATEST_TRAINING_JOB",
             "ModelArtifacts": "$MODEL_ARTIFACTS"
           }
