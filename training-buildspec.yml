@@ -100,7 +100,8 @@ phases:
           echo "Checking if training data exists in S3..."
           if aws s3 ls s3://${S3_BUCKET}/${S3_DATA_PREFIX}/ | grep -q ".npy"; then
             echo "Starting SageMaker training job..."
-            TRAINING_JOB_NAME="${PROJECT_NAME}-${ENVIRONMENT}-final-training-$(date +%Y%m%d%H%M%S)"
+            TIMESTAMP=$(date +%y%m%d%H%M)
+            TRAINING_JOB_NAME="gan-train-${TIMESTAMP}"
             
             # Get SageMaker role ARN
             SAGEMAKER_ROLE_ARN=$(aws cloudformation describe-stacks --stack-name STACKMOEGAN --query "Stacks[0].Outputs[?OutputKey=='SageMakerRoleArn'].OutputValue" --output text || echo "arn:aws:iam::${ACCOUNT_ID}:role/${PROJECT_NAME}-${ENVIRONMENT}-sagemaker-role")

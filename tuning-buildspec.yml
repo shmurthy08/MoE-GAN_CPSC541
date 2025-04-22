@@ -48,8 +48,8 @@ phases:
             echo "Starting SageMaker hyperparameter tuning job..."
             
             # Generate job name with timestamp
-            TIMESTAMP=$(date +%Y%m%d%H%M%S)
-            HPO_JOB_NAME="${PROJECT_NAME}-${ENVIRONMENT}-hpo-${TIMESTAMP}"
+            TIMESTAMP=$(date +%y%m%d%H%M)
+            HPO_JOB_NAME="gan-hpo-${TIMESTAMP}"
             
             # Get SageMaker role ARN
             SAGEMAKER_ROLE_ARN=$(aws cloudformation describe-stacks --stack-name STACKMOEGAN --query "Stacks[0].Outputs[?OutputKey=='SageMakerRoleArn'].OutputValue" --output text || echo "arn:aws:iam::${ACCOUNT_ID}:role/${PROJECT_NAME}-${ENVIRONMENT}-sagemaker-role")
