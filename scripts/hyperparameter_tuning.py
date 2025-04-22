@@ -159,11 +159,16 @@ def main():
     print(f"Starting hyperparameter tuning job: {args.job_name}")
     
     # Environment variables for data location
-    environment = {}
+    # Define the desired PYTHONPATH
+    desired_pythonpath = "/app:/app/data_processing:/app/scripts:/app/moegan"
+
+    # Environment variables for data location AND PYTHONPATH
+    environment = {
+        'PYTHONPATH': desired_pythonpath # Explicitly set PYTHONPATH here
+    }
     if args.data_bucket:
         environment['S3_DATA_BUCKET'] = args.data_bucket
         environment['S3_DATA_PREFIX'] = args.data_prefix
-    
     # Construct the HyperParameterTuningJobConfig
     tuning_job_config = {
         'Strategy': 'Bayesian',

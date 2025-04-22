@@ -25,6 +25,10 @@ if os.path.exists('..'):
     print(f"Parent directory contents: {os.listdir('..')}")
 if os.path.exists('/app'):
     print(f"/app directory contents: {os.listdir('/app')}")
+# Print files in /app/data_processing directory
+if os.path.exists('/app/data_processing'):
+    print(f"/app/data_processing directory contents: {os.listdir('/app/data_processing')}")
+
 
 # Import from data processing
 try:

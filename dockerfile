@@ -41,7 +41,7 @@ COPY scripts/*.py /app/scripts/
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
-ENV PYTHONPATH=/app
+ENV PYTHONPATH=/app:/app/data_processing:/app/scripts::/app/moegan
 
 
 
@@ -61,7 +61,7 @@ RUN pip install --no-cache-dir \
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
-ENV PYTHONPATH=/app
+ENV PYTHONPATH=/app:/app/data_processing:/app/scripts:/app/moegan
 
 # Create serving script
 RUN echo '#!/usr/bin/env python3\n\
