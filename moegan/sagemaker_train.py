@@ -10,15 +10,15 @@ import sys
 import traceback
 
 # Debug import issues by logging environment information
-print(f"Current working directory: {os.getcwd()}")
-print(f"Python path at start: {sys.path}")
-print(f"Directory contents: {os.listdir('.')}")
+print("Current working directory: {}".format(os.getcwd()))
+print("Python path at start: {}".format(sys.path))
+print("Directory contents: {}".format(os.listdir('.')))
 if os.path.exists('..'):
-    print(f"Parent directory contents: {os.listdir('..')}")
+    print("Parent directory contents: {}".format(os.listdir('..')))
 if os.path.exists('/app'):
-    print(f"/app directory contents: {os.listdir('/app')}")
+    print("/app directory contents: {}".format(os.listdir('/app')))
 
-# Simplified minimal dataset class - no dependency on data_processing
+# Simple dataset class - no dependency on data_processing
 class SimpleDataset(Dataset):
     """Simple dataset class that just loads preprocessed .npy files"""
     
@@ -28,27 +28,27 @@ class SimpleDataset(Dataset):
             images_file (string): Path to the numpy file with images
             text_embeddings_file (string): Path to the numpy file with text embeddings
         """
-        print(f"Loading images from: {images_file}")
-        print(f"Loading text embeddings from: {text_embeddings_file}")
+        print("Loading images from: {}".format(images_file))
+        print("Loading text embeddings from: {}".format(text_embeddings_file))
         
         try:
             self.images = np.load(images_file)
-            print(f"Loaded images shape: {self.images.shape}")
+            print("Loaded images shape: {}".format(self.images.shape))
         except Exception as e:
-            print(f"Error loading images file: {str(e)}")
+            print("Error loading images file: {}".format(str(e)))
             traceback.print_exc()
             raise
             
         try:
             self.text_embeddings = np.load(text_embeddings_file)
-            print(f"Loaded text embeddings shape: {self.text_embeddings.shape}")
+            print("Loaded text embeddings shape: {}".format(self.text_embeddings.shape))
         except Exception as e:
-            print(f"Error loading text embeddings file: {str(e)}")
+            print("Error loading text embeddings file: {}".format(str(e)))
             traceback.print_exc()
             raise
         
         # Verify dimensions match
-        assert len(self.images) == len(self.text_embeddings), f"Images count ({len(self.images)}) and text embeddings count ({len(self.text_embeddings)}) mismatch"
+        assert len(self.images) == len(self.text_embeddings), "Images count ({}) and text embeddings count ({}) mismatch".format(len(self.images), len(self.text_embeddings))
     
     def __len__(self):
         return len(self.images)
@@ -63,7 +63,7 @@ try:
     from t2i_moe_gan import train_aurora_gan, AuroraGenerator, AuroraDiscriminator
     print("✓ Successfully imported GAN components")
 except ImportError as e:
-    print(f"Error importing GAN components: {str(e)}")
+    print("Error importing GAN components: {}".format(str(e)))
     traceback.print_exc()
     sys.exit(1)
 
@@ -97,7 +97,7 @@ def download_from_s3(bucket, prefix, local_dir):
     os.makedirs(local_dir, exist_ok=True)
     s3 = boto3.client('s3')
     
-    print(f"Downloading data from s3://{bucket}/{prefix} to {local_dir}")
+    print("Downloading data from s3://{}/{} to {}".format(bucket, prefix, local_dir))
     
     # List objects in bucket/prefix
     response = s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
@@ -109,10 +109,10 @@ def download_from_s3(bucket, prefix, local_dir):
             local_file = os.path.join(local_dir, filename)
             
             # Download file
-            print(f"Downloading {key} to {local_file}")
+            print("Downloading {} to {}".format(key, local_file))
             s3.download_file(bucket, key, local_file)
     else:
-        print(f"No objects found in s3://{bucket}/{prefix}")
+        print("No objects found in s3://{}/{}".format(bucket, prefix))
 
 def main():
     """Main training function for SageMaker environment"""
@@ -121,11 +121,11 @@ def main():
     try:
         # Check if CUDA is available
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        print(f"Using device: {device}")
+        print("Using device: {}".format(device))
         
         # Parse hyperparameters
         params = parse_sagemaker_parameters()
-        print(f"Training with parameters: {params}")
+        print("Training with parameters: {}".format(params))
         
         # Create save directory for checkpoints
         save_dir = os.path.join(MODEL_PATH, 'checkpoints')
@@ -148,9 +148,9 @@ def main():
         
         # Check if files exist
         if not os.path.exists(train_img_path):
-            raise FileNotFoundError(f"Training images file not found: {train_img_path}")
+            raise FileNotFoundError("Training images file not found: {}".format(train_img_path))
         if not os.path.exists(train_emb_path):
-            raise FileNotFoundError(f"Training embeddings file not found: {train_emb_path}")
+            raise FileNotFoundError("Training embeddings file not found: {}".format(train_emb_path))
         
         # Check for validation data
         val_img_path = os.path.join(data_dir, 'mscoco_validation_images.npy')
@@ -159,9 +159,9 @@ def main():
         has_validation = os.path.exists(val_img_path) and os.path.exists(val_emb_path)
         
         # Load training dataset
-        print(f"Loading training data from {train_img_path} and {train_emb_path}")
+        print("Loading training data from {} and {}".format(train_img_path, train_emb_path))
         train_dataset = SimpleDataset(train_img_path, train_emb_path)
-        print(f"Loaded {len(train_dataset)} training samples")
+        print("Loaded {} training samples".format(len(train_dataset)))
         
         # Setup CloudWatch metrics
         cloudwatch = boto3.client('cloudwatch', region_name=os.environ.get('AWS_REGION', 'us-west-2'))
@@ -183,10 +183,10 @@ def main():
                 
                 # Log in a format SageMaker can parse for hyperparameter tuning
                 # Format: "[METRIC] metric_name: value"
-                print(f"[METRIC] {name}: {value}")
+                print("[METRIC] {}: {}".format(name, value))
                 
             except Exception as e:
-                print(f"Failed to log metric {name}: {e}")
+                print("Failed to log metric {}: {}".format(name, e))
         
         # Create training dataloader
         train_dataloader = DataLoader(
@@ -200,9 +200,9 @@ def main():
         
         # Load validation dataset if available
         if has_validation:
-            print(f"Loading validation data from {val_img_path} and {val_emb_path}")
+            print("Loading validation data from {} and {}".format(val_img_path, val_emb_path))
             val_dataset = SimpleDataset(val_img_path, val_emb_path)
-            print(f"Loaded {len(val_dataset)} validation samples")
+            print("Loaded {} validation samples".format(len(val_dataset)))
             
             val_dataloader = DataLoader(
                 val_dataset,
@@ -221,7 +221,7 @@ def main():
             # Log key metrics for this epoch
             for metric_name, value in metrics.items():
                 # Convert to string for consistent naming and prefix with 'val_' for validation metrics
-                metric_name_str = f"val_{metric_name}" if 'val' in metric_name else metric_name
+                metric_name_str = "val_{}".format(metric_name) if 'val' in metric_name else metric_name
                 log_metric(metric_name_str, value)
                 
             # Return True to continue training
@@ -254,27 +254,27 @@ def main():
             'discriminator': discriminator.state_dict(),
         }, final_model_path)
         
-        print(f"Training complete. Final model saved to {final_model_path}")
+        print("Training complete. Final model saved to {}".format(final_model_path))
     
     except Exception as e:
         print("\n" + "="*50)
         print("CRITICAL ERROR")
         print("="*50)
-        print(f"Error type: {type(e).__name__}")
-        print(f"Error message: {str(e)}")
+        print("Error type: {}".format(type(e).__name__))
+        print("Error message: {}".format(str(e)))
         print("\nDetailed traceback:")
         traceback.print_exc()
         
         # Additional system information for debugging
         print("\nSystem information:")
-        print(f"Python version: {sys.version}")
-        print(f"PyTorch version: {torch.__version__}")
-        print(f"NumPy version: {np.__version__}")
-        print(f"Available memory: {os.popen('free -h').read()}")
-        print(f"CPU info: {os.popen('cat /proc/cpuinfo | grep \"model name\" | head -1').read().strip()}")
+        print("Python version: {}".format(sys.version))
+        print("PyTorch version: {}".format(torch.__version__))
+        print("NumPy version: {}".format(np.__version__))
+        print("Available memory: {}".format(os.popen('free -h').read()))
+        print("CPU info: {}".format(os.popen('cat /proc/cpuinfo | grep "model name" | head -1').read().strip()))
         if torch.cuda.is_available():
-            print(f"GPU info: {torch.cuda.get_device_name(0)}")
-            print(f"GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
+            print("GPU info: {}".format(torch.cuda.get_device_name(0)))
+            print("GPU memory: {:.2f} GB".format(torch.cuda.get_device_properties(0).total_memory / 1e9))
         
         print("="*50)
         sys.exit(1)
