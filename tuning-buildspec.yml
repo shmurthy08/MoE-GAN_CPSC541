@@ -68,11 +68,13 @@ phases:
               --max-parallel-jobs 2 \
               --config configs/hyperparameter_config.json \
               --wait || exit 1  # Exit with error code if job fails
-              
-            echo "Hyperparameter tuning job started: $HPO_JOB_NAME"
             
-            # Create a CloudWatch event to track when the best tuning job completes
-            # This could trigger another build stage to deploy the best model
+            echo "Hyperparameter tuning job completed: $HPO_JOB_NAME"
+            
+            # Get the best model info
+            python scripts/get_best_model.py \
+              --tuning-job-name $HPO_JOB_NAME \
+              --output-file best_model_info.json || exit 1
             
             # Reset the SSM parameter to avoid running HPO again automatically
             aws ssm put-parameter --name "/${PROJECT_NAME}/${ENVIRONMENT}/run-hpo" --type "String" --value "false" --overwrite
@@ -86,18 +88,19 @@ phases:
   
   post_build:
     commands:
+      # Create output file
       - |
         BEST_MODEL_INFO="{}"
         if [ -f best_model_info.json ]; then
           BEST_MODEL_INFO=$(cat best_model_info.json)
         fi
-      # Create output file
       - |
         cat > tuning_output.json << EOF
         {
           "TuningInitiated": "$([[ "$RUN_HPO" = "true" ]] && echo "true" || echo "false")",
           "S3Bucket":"$S3_BUCKET",
-          "S3DataPrefix":"$S3_DATA_PREFIX"
+          "S3DataPrefix":"$S3_DATA_PREFIX",
+          "BestModelInfo": $BEST_MODEL_INFO
         }
         EOF
       - echo "Hyperparameter tuning stage complete."
