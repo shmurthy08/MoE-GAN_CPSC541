@@ -19,35 +19,55 @@ phases:
       - ECR_REPOSITORY_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${ECR_REPOSITORY_NAME}"
       - COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
       - IMAGE_TAG=${COMMIT_HASH:=latest}
+      
+      # Check if build should be skipped
+      - |
+        SKIP_BUILD=$(aws ssm get-parameter --name "/${PROJECT_NAME}/${ENVIRONMENT}/skip-build" --query "Parameter.Value" --output text || echo "false")
+        echo "Skip build: $SKIP_BUILD"
   
   build:
     commands:
-      # Build Docker images
-      - echo Building multi-stage Docker image
-      - docker build --target training -t ${ECR_REPOSITORY_URI}:${IMAGE_TAG}-training .
-      - docker build --target inference -t ${ECR_REPOSITORY_URI}:${IMAGE_TAG}-inference .
-      
-      # Tag latest
-      - docker tag ${ECR_REPOSITORY_URI}:${IMAGE_TAG}-training ${ECR_REPOSITORY_URI}:latest-training
-      - docker tag ${ECR_REPOSITORY_URI}:${IMAGE_TAG}-inference ${ECR_REPOSITORY_URI}:latest-inference
+      - |
+        if [ "$SKIP_BUILD" = "false" ]; then
+          echo "Building Docker images"
+          docker build --target training -t ${ECR_REPOSITORY_URI}:${IMAGE_TAG}-training .
+          docker build --target inference -t ${ECR_REPOSITORY_URI}:${IMAGE_TAG}-inference .
+          
+          # Tag latest
+          docker tag ${ECR_REPOSITORY_URI}:${IMAGE_TAG}-training ${ECR_REPOSITORY_URI}:latest-training
+          docker tag ${ECR_REPOSITORY_URI}:${IMAGE_TAG}-inference ${ECR_REPOSITORY_URI}:latest-inference
+        else
+          echo "Build skipped as indicated by SSM parameter"
+          echo "Using existing images from ECR"
+          
+          # Set IMAGE_TAG to latest if skipping build
+          IMAGE_TAG="latest"
+          echo "Using latest tag for existing images"
+        fi
   
   post_build:
     commands:
-      # Push Docker images
-      - echo "Authenticating with ECR"
-      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin ${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com
-      - echo Pushing to ECR
-      - docker push ${ECR_REPOSITORY_URI}:${IMAGE_TAG}-training
-      - docker push ${ECR_REPOSITORY_URI}:${IMAGE_TAG}-inference
+      - |
+        if [ "$SKIP_BUILD" = "false" ]; then
+          # Authenticate and push only if we built new images
+          echo "Authenticating with ECR"
+          aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin ${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com
+          echo "Pushing to ECR"
+          docker push ${ECR_REPOSITORY_URI}:${IMAGE_TAG}-training
+          docker push ${ECR_REPOSITORY_URI}:${IMAGE_TAG}-inference
+        else
+          echo "Skipping push to ECR since build was skipped"
+        fi
       
-      # Create output file
+      # Create output file (always needed for subsequent stages)
       - |
         cat > build_output.json << EOF
         {
           "TrainingImageUri":"${ECR_REPOSITORY_URI}:${IMAGE_TAG}-training",
           "InferenceImageUri":"${ECR_REPOSITORY_URI}:${IMAGE_TAG}-inference",
           "S3Bucket":"${PROJECT_NAME}-${ENVIRONMENT}-artifacts-${ACCOUNT_ID}",
-          "S3DataPrefix":"mscoco_processed"
+          "S3DataPrefix":"mscoco_processed",
+          "BuildSkipped":"${SKIP_BUILD}"
         }
         EOF
 
