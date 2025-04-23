@@ -913,9 +913,9 @@ def train_aurora_gan(
     log_interval=10, save_interval=1000,
     metric_callback=None,  # Add metric callback parameter
     use_amp=True,          # Automatic mixed precision
-    gradient_accumulation_steps=1, # Gradient accumulation for larger effective batch size
+    gradient_accumulation_steps=4, # Gradient accumulation for larger effective batch size
     checkpoint_activation=True,    # Enable gradient checkpointing
-    batch_memory_limit=None        # Memory limit per batch in GB
+    batch_memory_limit=10.0        # Memory limit per batch in GB
 ):
     """
     Train the Aurora GAN model with R1, Matching-Aware, Multi-level CLIP loss.

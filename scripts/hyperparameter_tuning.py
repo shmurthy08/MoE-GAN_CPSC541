@@ -144,8 +144,8 @@ def main():
                 }
             },
             "static_hyperparameters": {
-                "epochs": "5",  
-                "batch_size": "32"
+                "epochs": "10",  
+                "batch_size": "8"
             },
             "objective_metric": {
                 "name": "val_clip_loss",  
