@@ -34,7 +34,7 @@ def get_clip_model():
     global _clip_model
     global _clip_preprocess
     
-    if _clip_model is None:
+    if (_clip_model is None) or (_clip_preprocess is None):
         logger.info(f"\nLoading CLIP model {CLIP_MODEL_TYPE}")
         _clip_model, _clip_preprocess = clip.load(CLIP_MODEL_TYPE, device=DEVICE, jit=False)
         _clip_model.eval()
@@ -606,6 +606,7 @@ class AuroraGenerator(nn.Module):
 
         self.latent_dim = latent_dim
         self.text_embedding_dim = text_embedding_dim
+        self._use_checkpointing = False
 
         # Text projection (using pre-computed CLIP embeddings)
         self.text_projection = nn.Sequential(
@@ -639,6 +640,18 @@ class AuroraGenerator(nn.Module):
         # To RGB layers for different resolutions
         self.to_rgb_32 = ModulatedConv(64, 3, kernel_size=1)
         self.to_rgb_64 = ModulatedConv(32, 3, kernel_size=1)
+    
+    def enable_checkpointing(self):
+        """Enable gradient checkpointing to save memory"""
+        self._use_checkpointing = True
+        logger.info("Gradient checkpointing enabled on generator")
+        return self
+    
+    def disable_checkpointing(self):
+        """Disable gradient checkpointing"""
+        self._use_checkpointing = False
+        logger.info("Gradient checkpointing disabled on generator")
+        return self
 
     def encode_text(self, text_or_embeddings):
         """
@@ -649,8 +662,32 @@ class AuroraGenerator(nn.Module):
         else:
             text_embeddings = text_or_embeddings
         return text_embeddings
+    
+    def _run_block_with_checkpoint(self, block_fn, x, w, text_seq, kl_losses):
+        """Run a generative block with optional gradient checkpointing"""
+        if self._use_checkpointing and self.training:
+            return torch.utils.checkpoint.checkpoint(
+                block_fn,
+                x, w, text_seq, kl_losses
+            )
+        else:
+            return block_fn(x, w, text_seq, kl_losses)
+    
+    def _block_4_fn(self, x, w, text_seq, kl_losses):
+        return self.gen_block_4(x, w, text_seq, kl_losses)
+    
+    def _block_8_fn(self, x, w, text_seq, kl_losses):
+        return self.gen_block_8(x, w, text_seq, kl_losses)
+    
+    def _block_16_fn(self, x, w, text_seq, kl_losses):
+        return self.gen_block_16(x, w, text_seq, kl_losses)
+    
+    def _block_32_fn(self, x, w, text_seq, kl_losses):
+        return self.gen_block_32(x, w, text_seq, kl_losses)
+    
+    def _block_64_fn(self, x, w, text_seq, kl_losses):
+        return self.gen_block_64(x, w, text_seq, kl_losses)
 
-    # !! MODIFIED: Added return_intermediate flag !!
     def forward(self, z, text_input, truncation_psi=0.7, return_routing=False, return_intermediate=False):
         batch_size = z.size(0)
 
@@ -671,8 +708,8 @@ class AuroraGenerator(nn.Module):
             with torch.no_grad():
                 mean_latent = self.mapping(
                     torch.cat([
-                        torch.zeros(1, self.latent_dim, device=z.device), # Use z.device
-                        torch.zeros(1, self.text_embedding_dim, device=z.device) # Use z.device
+                        torch.zeros(1, self.latent_dim, device=z.device), 
+                        torch.zeros(1, self.text_embedding_dim, device=z.device)
                     ], dim=1)
                 )
             w = mean_latent + truncation_psi * (w - mean_latent)
@@ -683,45 +720,41 @@ class AuroraGenerator(nn.Module):
 
         # Generate 4x4 image
         x = self.constant.repeat(batch_size, 1, 1, 1)
-        x, r_probs = self.gen_block_4(x, w, text_seq, kl_losses)
+        x, r_probs = self._run_block_with_checkpoint(self._block_4_fn, x, w, text_seq, kl_losses)
         routing_probs.append(r_probs)
 
         # Generate 8x8 image
-        x, r_probs = self.gen_block_8(x, w, text_seq, kl_losses)
+        x, r_probs = self._run_block_with_checkpoint(self._block_8_fn, x, w, text_seq, kl_losses)
         routing_probs.append(r_probs)
 
         # Generate 16x16 image
-        x, r_probs = self.gen_block_16(x, w, text_seq, kl_losses)
+        x, r_probs = self._run_block_with_checkpoint(self._block_16_fn, x, w, text_seq, kl_losses)
         routing_probs.append(r_probs)
 
         # Generate 32x32 image
-        x, r_probs = self.gen_block_32(x, w, text_seq, kl_losses)
+        x, r_probs = self._run_block_with_checkpoint(self._block_32_fn, x, w, text_seq, kl_losses)
         routing_probs.append(r_probs)
         x_32 = self.to_rgb_32(x, w) # Keep 32x32 output
 
         # Generate 64x64 image (final resolution)
-        x, r_probs = self.gen_block_64(x, w, text_seq, kl_losses)
+        x, r_probs = self._run_block_with_checkpoint(self._block_64_fn, x, w, text_seq, kl_losses)
         routing_probs.append(r_probs)
         x_64 = self.to_rgb_64(x, w) # Keep 64x64 output
 
-        # Combine outputs from different resolutions (optional, but common in progressive GANs)
-        # Ensure interpolation happens before adding
+        # Combine outputs from different resolutions
         x_32_upsampled = F.interpolate(x_32, scale_factor=2, mode='bilinear', align_corners=False)
-        final_image = x_64 + x_32_upsampled # The paper might do this differently, check Fig 2/StyleGAN details if needed
+        final_image = x_64 + x_32_upsampled
 
         # Calculate total KL loss
-        kl_loss = sum(kl_losses) if kl_losses else torch.tensor(0.0, device=x.device) # Use x.device
+        kl_loss = sum(kl_losses) if kl_losses else torch.tensor(0.0, device=x.device)
 
-        # !! MODIFIED Return Value !!
         if return_routing and return_intermediate:
             return final_image, x_32, kl_loss, routing_probs
         elif return_routing:
-             # Need to decide what intermediate value means here, returning None for x_32
             return final_image, None, kl_loss, routing_probs
         elif return_intermediate:
             return final_image, x_32, kl_loss
         else:
-            # Original return signature for inference might need None for x_32
             return final_image, kl_loss
 
 
@@ -878,7 +911,11 @@ def train_aurora_gan(
     balance_weight = 0.01,
     device=DEVICE, save_dir='./aurora_checkpoints',
     log_interval=10, save_interval=1000,
-    metric_callback=None  # Add metric callback parameter
+    metric_callback=None,  # Add metric callback parameter
+    use_amp=True,          # Automatic mixed precision
+    gradient_accumulation_steps=1, # Gradient accumulation for larger effective batch size
+    checkpoint_activation=True,    # Enable gradient checkpointing
+    batch_memory_limit=None        # Memory limit per batch in GB
 ):
     """
     Train the Aurora GAN model with R1, Matching-Aware, Multi-level CLIP loss.
@@ -900,6 +937,10 @@ def train_aurora_gan(
         log_interval: How often to log metrics
         save_interval: How often to save checkpoints
         metric_callback: Optional callback function for reporting metrics for hyperparameter tuning
+        use_amp: Whether to use automatic mixed precision training
+        gradient_accumulation_steps: Number of steps to accumulate gradients before updating weights
+        checkpoint_activation: Whether to use gradient checkpointing to save memory
+        batch_memory_limit: Maximum GPU memory per batch in GB
         
     Returns:
         Trained generator and discriminator models
@@ -910,11 +951,19 @@ def train_aurora_gan(
     # Initialize models
     generator = AuroraGenerator().to(device)
     discriminator = AuroraDiscriminator().to(device)
-
+    
+    # Enable gradient checkpointing to save memory
+    if checkpoint_activation and hasattr(generator, 'enable_checkpointing'):
+        logger.info("Enabling gradient checkpointing for memory efficiency")
+        generator.enable_checkpointing()
+    
     # Initialize optimizers
     optimizer_g = torch.optim.Adam(generator.parameters(), lr=lr, betas=(beta1, beta2))
     optimizer_d = torch.optim.Adam(discriminator.parameters(), lr=lr, betas=(beta1, beta2))
 
+    # Initialize AMP scaler for mixed precision training
+    scaler = torch.cuda.amp.GradScaler() if use_amp and torch.cuda.is_available() else None
+    
     # Initialize loss function
     gan_loss = AuroraGANLoss(device)
 
@@ -924,7 +973,7 @@ def train_aurora_gan(
         print(f"Starting epoch {epoch+1}/{num_epochs}")
 
         epoch_pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{num_epochs}")
-
+        
         running_d_loss = 0.0
         running_g_loss = 0.0
         running_r1_loss = 0.0
@@ -932,9 +981,22 @@ def train_aurora_gan(
         running_balance_loss = 0.0
         running_clip_loss_64 = 0.0
         running_clip_loss_32 = 0.0
+        
+        # Reset gradients at start of epoch
+        optimizer_d.zero_grad()
+        optimizer_g.zero_grad()
 
         for batch_idx, (real_images, text_embeddings) in enumerate(epoch_pbar):
             batch_size = real_images.size(0)
+            
+            # Check memory limit if specified
+            if batch_memory_limit and torch.cuda.is_available():
+                current_memory = torch.cuda.memory_allocated() / 1e9  # Convert to GB
+                if current_memory > batch_memory_limit:
+                    logger.warning(f"Memory limit exceeded: {current_memory:.2f}GB > {batch_memory_limit}GB")
+                    logger.warning("Skipping batch to prevent OOM error")
+                    torch.cuda.empty_cache()
+                    continue
 
             # Move data to device
             real_images = real_images.to(device)
@@ -946,68 +1008,102 @@ def train_aurora_gan(
             # ------------------------
             # Train Discriminator
             # ------------------------
-            optimizer_d.zero_grad()
+            # We don't need to zero gradients every step with gradient accumulation
+            if batch_idx % gradient_accumulation_steps == 0:
+                optimizer_d.zero_grad()
 
             # --- Real images (Matching) ---
             # Enable gradient computation for R1 penalty
             real_images.requires_grad = True
-            real_pred = discriminator(real_images, text_embeddings)
+            
+            with torch.cuda.amp.autocast() if use_amp else nullcontext():
+                real_pred = discriminator(real_images, text_embeddings)
 
-            # --- R1 Regularization ---
-            grad_real, = torch.autograd.grad(
-                outputs=real_pred.sum(), inputs=real_images, create_graph=True
-            )
-            grad_penalty = grad_real.view(grad_real.size(0), -1).norm(2, dim=1) ** 2
-            r1_loss = (r1_gamma / 2) * grad_penalty.mean() # Divide gamma by 2, common practice
+                # --- R1 Regularization ---
+                grad_real, = torch.autograd.grad(
+                    outputs=real_pred.sum(), inputs=real_images, create_graph=True
+                )
+                grad_penalty = grad_real.view(grad_real.size(0), -1).norm(2, dim=1) ** 2
+                r1_loss = (r1_gamma / 2) * grad_penalty.mean() # Divide gamma by 2, common practice
 
-            # --- Fake images ---
-            with torch.no_grad():
-                # Request intermediate output for multi-level CLIP later
-                # Note: generator returns final_image, intermediate_image, kl_loss, routing_probs
-                fake_images_64, fake_images_32, _, _ = generator(z, text_embeddings, return_intermediate=True, return_routing=True)
-            fake_pred = discriminator(fake_images_64.detach(), text_embeddings) # Use final fake image
+                # --- Fake images ---
+                with torch.no_grad():
+                    # Request intermediate output for multi-level CLIP later
+                    # Note: generator returns final_image, intermediate_image, kl_loss, routing_probs
+                    fake_images_64, fake_images_32, _, _ = generator(z, text_embeddings, return_intermediate=True, return_routing=True)
+                fake_pred = discriminator(fake_images_64.detach(), text_embeddings) # Use final fake image
 
-            # --- Mismatched real images/text ---
-            # Simple shuffle within the batch for mismatching
-            shuffled_indices = torch.randperm(batch_size)
-            mismatched_text_embeddings = text_embeddings[shuffled_indices]
-            mismatched_pred = discriminator(real_images.detach(), mismatched_text_embeddings) # Use detached real images
+                # --- Mismatched real images/text ---
+                # Simple shuffle within the batch for mismatching
+                shuffled_indices = torch.randperm(batch_size)
+                mismatched_text_embeddings = text_embeddings[shuffled_indices]
+                mismatched_pred = discriminator(real_images.detach(), mismatched_text_embeddings) # Use detached real images
 
-            # --- Discriminator loss (includes matching-aware) ---
-            # Loss now includes real, fake, and mismatched terms
-            d_loss_gan = gan_loss.discriminator_loss(real_pred, fake_pred, mismatched_pred)
+                # --- Discriminator loss (includes matching-aware) ---
+                # Loss now includes real, fake, and mismatched terms
+                d_loss_gan = gan_loss.discriminator_loss(real_pred, fake_pred, mismatched_pred)
 
-            # Total Discriminator Loss
-            d_loss = d_loss_gan + r1_loss
-            d_loss.backward()
-            optimizer_d.step()
+                # Total Discriminator Loss
+                d_loss = d_loss_gan + r1_loss
+            
+            # Scale the loss if using AMP
+            if scaler:
+                scaler.scale(d_loss / gradient_accumulation_steps).backward()
+            else:
+                (d_loss / gradient_accumulation_steps).backward()
+            
+            # Only step optimizer after accumulating gradients
+            if (batch_idx + 1) % gradient_accumulation_steps == 0 or (batch_idx + 1) == len(dataloader):
+                if scaler:
+                    scaler.step(optimizer_d)
+                else:
+                    optimizer_d.step()
+                
+                if scaler:
+                    scaler.update()
 
             # ------------------------
             # Train Generator
             # ------------------------
-            optimizer_g.zero_grad()
+            if batch_idx % gradient_accumulation_steps == 0:
+                optimizer_g.zero_grad()
 
-            # Generate fake images, get intermediate, KL loss, and routing probs
-            fake_images_64, fake_images_32, kl_loss, routing_probs = generator(z, text_embeddings, return_intermediate=True, return_routing=True)
+            with torch.cuda.amp.autocast() if use_amp else nullcontext():
+                # Generate fake images, get intermediate, KL loss, and routing probs
+                fake_images_64, fake_images_32, kl_loss, routing_probs = generator(z, text_embeddings, return_intermediate=True, return_routing=True)
 
-            # Discriminator prediction on fake images (use final resolution)
-            fake_pred_g = discriminator(fake_images_64, text_embeddings) # Use G's output directly
+                # Discriminator prediction on fake images (use final resolution)
+                fake_pred_g = discriminator(fake_images_64, text_embeddings) # Use G's output directly
 
-            # --- Generator Adversarial Loss ---
-            g_loss_gan = gan_loss.generator_loss(fake_pred_g, kl_loss, kl_weight=kl_weight)
+                # --- Generator Adversarial Loss ---
+                g_loss_gan = gan_loss.generator_loss(fake_pred_g, kl_loss, kl_weight=kl_weight)
 
-            # --- Multi-level CLIP Loss ---
-            clip_loss_64 = gan_loss.compute_clip_loss(fake_images_64, text_embeddings)
-            clip_loss_32 = gan_loss.compute_clip_loss(fake_images_32, text_embeddings) # CLIP loss on 32x32
-            g_loss_clip = (clip_weight_64 * clip_loss_64) + (clip_weight_32 * clip_loss_32)
+                # --- Multi-level CLIP Loss ---
+                clip_loss_64 = gan_loss.compute_clip_loss(fake_images_64, text_embeddings)
+                clip_loss_32 = gan_loss.compute_clip_loss(fake_images_32, text_embeddings) # CLIP loss on 32x32
+                g_loss_clip = (clip_weight_64 * clip_loss_64) + (clip_weight_32 * clip_loss_32)
 
-            # --- MoE Balance Loss ---
-            balance_loss = gan_loss.moe_balance_loss(routing_probs, balance_weight=balance_weight)
+                # --- MoE Balance Loss ---
+                balance_loss = gan_loss.moe_balance_loss(routing_probs, balance_weight=balance_weight)
 
-            # --- Total Generator Loss ---
-            g_loss = g_loss_gan + g_loss_clip + balance_loss
-            g_loss.backward()
-            optimizer_g.step()
+                # --- Total Generator Loss ---
+                g_loss = g_loss_gan + g_loss_clip + balance_loss
+            
+            # Scale the loss if using AMP
+            if scaler:
+                scaler.scale(g_loss / gradient_accumulation_steps).backward()
+            else:
+                (g_loss / gradient_accumulation_steps).backward()
+            
+            # Only step optimizer after accumulating gradients
+            if (batch_idx + 1) % gradient_accumulation_steps == 0 or (batch_idx + 1) == len(dataloader):
+                if scaler:
+                    scaler.step(optimizer_g)
+                else:
+                    optimizer_g.step()
+                
+                if scaler:
+                    scaler.update()
 
             # Update running losses for progress bar
             running_d_loss = 0.9 * running_d_loss + 0.1 * d_loss_gan.item() # Track gan part of D loss
@@ -1017,7 +1113,6 @@ def train_aurora_gan(
             running_balance_loss = 0.9 * running_balance_loss + 0.1 * balance_loss.item()
             running_clip_loss_64 = 0.9 * running_clip_loss_64 + 0.1 * clip_loss_64.item()
             running_clip_loss_32 = 0.9 * running_clip_loss_32 + 0.1 * clip_loss_32.item()
-
 
             # Update progress bar description with loss values
             epoch_pbar.set_postfix({
@@ -1036,9 +1131,12 @@ def train_aurora_gan(
                       f"D_loss: {d_loss.item():.4f} (GAN: {d_loss_gan.item():.4f}, R1: {r1_loss.item():.4f}), "
                       f"G_loss: {g_loss.item():.4f} (GAN: {g_loss_gan.item():.4f}, Clip64: {clip_loss_64.item():.4f}, Clip32: {clip_loss_32.item():.4f}, KL: {kl_loss.item():.4f}, Balance: {balance_loss.item():.4f})")
 
-
             # Save models
             if step % save_interval == 0 and step > 0: # Avoid saving at step 0
+                # Clean GPU memory before saving to avoid OOM
+                torch.cuda.empty_cache()
+                
+                checkpoint_path = os.path.join(save_dir, f"aurora_checkpoint_{step}.pt")
                 torch.save({
                     'generator': generator.state_dict(),
                     'discriminator': discriminator.state_dict(),
@@ -1046,14 +1144,14 @@ def train_aurora_gan(
                     'optimizer_d': optimizer_d.state_dict(),
                     'epoch': epoch,
                     'step': step
-                }, os.path.join(save_dir, f"aurora_checkpoint_{step}.pt"))
-
+                }, checkpoint_path)
+                
             step += 1
 
         # Close the progress bar for this epoch
         epoch_pbar.close()
 
-        # Validation (if provided) - Needs adjustment for new generator return values
+        # Validation (if provided)
         if val_dataloader is not None:
             generator.eval()
             discriminator.eval()
@@ -1076,6 +1174,9 @@ def train_aurora_gan(
                     val_text_embeddings = val_text_embeddings.to(device)
                     val_z = torch.randn(val_batch_size, LATENT_DIM, device=device)
 
+                    # Free up some memory before validation step
+                    torch.cuda.empty_cache()
+                    
                     # Real images
                     val_real_pred = discriminator(val_real_images, val_text_embeddings)
 
@@ -1141,6 +1242,9 @@ def train_aurora_gan(
             discriminator.train()
 
         # Save model after each epoch
+        # Clean GPU memory first
+        torch.cuda.empty_cache()
+        
         epoch_save_path = os.path.join(save_dir, f"aurora_checkpoint_epoch_{epoch+1}.pt")
         torch.save({
             'generator': generator.state_dict(),
@@ -1150,9 +1254,13 @@ def train_aurora_gan(
             'epoch': epoch + 1,
             'step': step
         }, epoch_save_path)
+        
         print(f"Checkpoint saved to {epoch_save_path}")
 
     # Save final models
+    # Clean GPU memory first
+    torch.cuda.empty_cache()
+    
     final_save_path = os.path.join(save_dir, "aurora_final.pt")
     torch.save({
         'generator': generator.state_dict(),
@@ -1162,6 +1270,7 @@ def train_aurora_gan(
         'epoch': num_epochs,
         'step': step
     }, final_save_path)
+    
     print(f"Final model saved to {final_save_path}")
 
     return generator, discriminator
