@@ -216,7 +216,7 @@ def main():
         # Create training dataloader
         train_dataloader = DataLoader(
             train_dataset, 
-            batch_size=params.get('batch_size', 32),
+            batch_size=params.get('batch_size', 8),
             shuffle=True, 
             num_workers=max(1, os.cpu_count() // 2), 
             pin_memory=True,
