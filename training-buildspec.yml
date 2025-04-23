@@ -128,7 +128,7 @@ phases:
               $HYPERPARAMS_ARG \
               --wait || exit 1  # Exit with error code if job fails
               
-            echo "Training job started: $TRAINING_JOB_NAME"
+            echo "Training job completed: $TRAINING_JOB_NAME"
           else
             echo "No training data found in S3. Cannot start training job."
             echo "Skipping training job."

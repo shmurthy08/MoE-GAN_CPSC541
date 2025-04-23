@@ -1266,7 +1266,7 @@ def train_aurora_gan(
         'generator': generator.state_dict(),
         'discriminator': discriminator.state_dict(),
         'optimizer_g': optimizer_g.state_dict(),
-        'optimizer_d': optimizer_d.state.dict(),
+        'optimizer_d': optimizer_d.state_dict(),
         'epoch': num_epochs,
         'step': step
     }, final_save_path)
