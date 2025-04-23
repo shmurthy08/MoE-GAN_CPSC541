@@ -43,7 +43,7 @@
     },
     "static_hyperparameters": {
       "epochs": "5",
-      "batch_size": "8"
+      "batch_size": "16"
     },
     "objective_metric": {
       "name": "val_clip_loss",

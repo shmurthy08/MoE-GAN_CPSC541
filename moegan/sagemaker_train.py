@@ -22,33 +22,41 @@ if os.path.exists('/app'):
 class SimpleDataset(Dataset):
     """Simple dataset class that just loads preprocessed .npy files"""
     
-    def __init__(self, images_file, text_embeddings_file):
+    # Add this function to SimpleDataset in sagemaker_train.py
+    def __init__(self, images_file, text_embeddings_file, use_percentage=1.0):
         """
         Args:
             images_file (string): Path to the numpy file with images
             text_embeddings_file (string): Path to the numpy file with text embeddings
+            use_percentage (float): Percentage of data to use (0.0-1.0)
         """
         print("Loading images from: {}".format(images_file))
         print("Loading text embeddings from: {}".format(text_embeddings_file))
         
         try:
-            self.images = np.load(images_file)
-            print("Loaded images shape: {}".format(self.images.shape))
-        except Exception as e:
-            print("Error loading images file: {}".format(str(e)))
-            traceback.print_exc()
-            raise
+            # Load full arrays
+            all_images = np.load(images_file)
+            all_text_embeddings = np.load(text_embeddings_file)
             
-        try:
-            self.text_embeddings = np.load(text_embeddings_file)
+            # Calculate how many samples to keep
+            total_samples = len(all_images)
+            keep_samples = int(total_samples * use_percentage)
+            
+            # Use only a subset of the data
+            self.images = all_images[:keep_samples]
+            self.text_embeddings = all_text_embeddings[:keep_samples]
+            
+            print("Loaded images shape: {} (using {}% - {} samples)".format(
+                self.images.shape, use_percentage*100, keep_samples))
             print("Loaded text embeddings shape: {}".format(self.text_embeddings.shape))
         except Exception as e:
-            print("Error loading text embeddings file: {}".format(str(e)))
+            print("Error loading data files: {}".format(str(e)))
             traceback.print_exc()
             raise
         
         # Verify dimensions match
-        assert len(self.images) == len(self.text_embeddings), "Images count ({}) and text embeddings count ({}) mismatch".format(len(self.images), len(self.text_embeddings))
+        assert len(self.images) == len(self.text_embeddings), "Images count ({}) and text embeddings count ({}) mismatch".format(
+            len(self.images), len(self.text_embeddings))
     
     def __len__(self):
         return len(self.images)
@@ -183,10 +191,10 @@ def main():
         
         has_validation = os.path.exists(val_img_path) and os.path.exists(val_emb_path)
         
-        # Load training dataset
+        # Load training dataset (USING ONLY 50% OF DATA FOR FASTER TRAINING)
         print("Loading training data from {} and {}".format(train_img_path, train_emb_path))
-        train_dataset = SimpleDataset(train_img_path, train_emb_path)
-        print("Loaded {} training samples".format(len(train_dataset)))
+        train_dataset = SimpleDataset(train_img_path, train_emb_path, use_percentage=0.5)
+        print("Loaded {} training samples (50% of total)".format(len(train_dataset)))
         
         # Setup CloudWatch metrics
         cloudwatch = boto3.client('cloudwatch', region_name=os.environ.get('AWS_REGION', 'us-west-2'))
@@ -213,29 +221,30 @@ def main():
             except Exception as e:
                 print("Failed to log metric {}: {}".format(name, e))
         
-        # Create training dataloader
+        # Create training dataloader with batch size 16
         train_dataloader = DataLoader(
             train_dataset, 
-            batch_size=params.get('batch_size', 8),
+            batch_size=params.get('batch_size', 16),  # Changed to 16
             shuffle=True, 
-            num_workers=max(1, os.cpu_count() // 2), 
+            num_workers=max(1, os.cpu_count() // 2 if os.cpu_count() is not None else 1), 
             pin_memory=True,
             drop_last=True
         )
-        
-        # Load validation dataset if available
+
+        # Leave validation dataset at 100%
         if has_validation:
             print("Loading validation data from {} and {}".format(val_img_path, val_emb_path))
-            val_dataset = SimpleDataset(val_img_path, val_emb_path)
+            val_dataset = SimpleDataset(val_img_path, val_emb_path, use_percentage=1.0)
             print("Loaded {} validation samples".format(len(val_dataset)))
             
             val_dataloader = DataLoader(
                 val_dataset,
-                batch_size=params.get('batch_size', 32),
+                batch_size=params.get('batch_size', 16),  # Changed to 16 for consistency
                 shuffle=False,
-                num_workers=max(1, os.cpu_count() // 2),
+                num_workers=max(1, os.cpu_count() // 2 if os.cpu_count() is not None else 1),
                 pin_memory=True
             )
+
         else:
             val_dataloader = None
             print("No validation data found, skipping validation")
@@ -256,7 +265,7 @@ def main():
         generator, discriminator = train_aurora_gan(
             train_dataloader, 
             val_dataloader=val_dataloader,
-            num_epochs=params.get('epochs', 10),
+            num_epochs=params.get('epochs', 5),
             lr=params.get('learning_rate', 0.0002),
             beta1=params.get('beta1', 0.5),
             beta2=params.get('beta2', 0.999),
@@ -269,7 +278,10 @@ def main():
             save_dir=save_dir,
             log_interval=50,
             save_interval=500,
-            metric_callback=metric_callback  # Add the callback for metric reporting
+            metric_callback=metric_callback,
+            gradient_accumulation_steps=2,
+            checkpoint_activation=True,
+            batch_memory_limit=10.0
         )
         
         # Save final model 
