@@ -115,13 +115,13 @@ def main():
     # --- Create dataloaders ---
     train_dataloader = DataLoader(
         train_dataset, batch_size=args.batch_size,
-        shuffle=True, num_workers=4, pin_memory=True, drop_last=True # drop_last can help stability
+        shuffle=True, num_workers=max(1, os.cpu_count() // 2), pin_memory=True, drop_last=True # drop_last can help stability
     )
 
     if val_dataset:
         val_dataloader = DataLoader(
             val_dataset, batch_size=args.batch_size,
-            shuffle=False, num_workers=4, pin_memory=True
+            shuffle=False, num_workers=max(1, os.cpu_count() // 2), pin_memory=True
         )
     else:
         val_dataloader = None

@@ -119,10 +119,35 @@ def main():
     print("Starting MoE-GAN training in SageMaker environment")
     
     try:
+        # Memory optimization settings
+        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'  # Reduced from 512
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
+        
+        # Additional memory optimizations
+        torch.cuda.empty_cache()  # Clear CUDA cache before starting
+        
+        # Enable gradient checkpointing to save memory at cost of some speed
+        os.environ['PYTORCH_ENABLE_GRAD_CHECKPOINT'] = '1'
+        
+        # Enable automatic mixed precision training
+        use_amp = True
+        scaler = torch.cuda.amp.GradScaler() if use_amp else None
+        
+        # Set memory efficient attention
+        os.environ['PYTORCH_ATTENTION_IMPLEMENTATION'] = 'mem_efficient'
+        
+        # Use pinned memory for faster transfers but less host memory
+        pin_memory = torch.cuda.is_available()
+        
         # Check if CUDA is available
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print("Using device: {}".format(device))
         
+        # Set optimal tensor layout
+        if torch.cuda.is_available():
+            torch.backends.cuda.matmul.allow_tf32 = True  # Allow TF32 for faster training
+            
         # Parse hyperparameters
         params = parse_sagemaker_parameters()
         print("Training with parameters: {}".format(params))
@@ -193,7 +218,7 @@ def main():
             train_dataset, 
             batch_size=params.get('batch_size', 32),
             shuffle=True, 
-            num_workers=os.cpu_count(), 
+            num_workers=max(1, os.cpu_count() // 2), 
             pin_memory=True,
             drop_last=True
         )
