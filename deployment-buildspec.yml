@@ -60,7 +60,7 @@ phases:
           echo "Creating endpoint configuration..."
           aws sagemaker create-endpoint-config \
             --endpoint-config-name gan-ep-config-${ENVIRONMENT} \
-              --production-variants "VariantName=AllTraffic,ModelName=gan-model-${ENVIRONMENT},InitialInstanceCount=1,InstanceType=ml.g4dn.xlarge" \
+              --production-variants "VariantName=AllTraffic,ModelName=gan-model-${ENVIRONMENT},InitialInstanceCount=1,InstanceType=ml.g5.xlarge" \
             --tags Key=Project,Value=${PROJECT_NAME}
           
           # Check if endpoint exists
