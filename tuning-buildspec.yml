@@ -63,7 +63,7 @@ phases:
               --prefix tuning/$HPO_JOB_NAME \
               --data-bucket $S3_BUCKET \
               --data-prefix $S3_DATA_PREFIX \
-              --instance-type ml.g4dn.xlarge \
+              --instance-type ml.g5.xlarge \
               --max-jobs 5 \
               --max-parallel-jobs 2 \
               --config configs/hyperparameter_config.json \

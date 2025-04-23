@@ -29,7 +29,8 @@ Parameters:
     AllowedValues:
       - ml.m5.xlarge
       - ml.t2.medium
-      - ml.g4dn.xlarge
+      - ml.g5.xlarge
+      - ml.g5.2xlarge
     Description: SageMaker instance type for the endpoint (free tier eligible)
 
 Resources:

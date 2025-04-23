@@ -77,7 +77,7 @@ def main():
     parser.add_argument('--prefix', required=True, help='S3 prefix for model artifacts')
     parser.add_argument('--data-bucket', help='S3 bucket containing training data')
     parser.add_argument('--data-prefix', default='mscoco_processed', help='S3 prefix for training data')
-    parser.add_argument('--instance-type', default='ml.g4dn.xlarge', help='Instance type')
+    parser.add_argument('--instance-type', default='ml.g5.xlarge', help='Instance type')
     parser.add_argument('--max-jobs', type=int, default=10, help='Maximum number of training jobs')
     parser.add_argument('--max-parallel-jobs', type=int, default=2, help='Maximum parallel training jobs')
     parser.add_argument('--config', help='Path to hyperparameter configuration JSON file')

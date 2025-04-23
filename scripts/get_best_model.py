@@ -54,7 +54,7 @@ def get_best_tuning_job(tuning_job_name):
         }
     }
 
-def deploy_best_model(best_model_info, role_arn, image_uri, model_name=None, endpoint_config_name=None, endpoint_name=None, instance_type='ml.g4dn.xlarge'):
+def deploy_best_model(best_model_info, role_arn, image_uri, model_name=None, endpoint_config_name=None, endpoint_name=None, instance_type='ml.g5.xlarge'):
     """
     Deploy the best model from a hyperparameter tuning job
     """
@@ -164,7 +164,7 @@ def main():
     parser.add_argument('--deploy', action='store_true', help='Deploy the best model after retrieving it')
     parser.add_argument('--model-name', help='Name for the deployed model (default: auto-generated)')
     parser.add_argument('--endpoint-name', help='Name for the deployed endpoint (default: auto-generated)')
-    parser.add_argument('--instance-type', default='ml.g4dn.xlarge', help='Instance type for the endpoint')
+    parser.add_argument('--instance-type', default='ml.g5.xlarge', help='Instance type for the endpoint')
     parser.add_argument('--output-file', help='Save best model info to this JSON file')
     
     args = parser.parse_args()
