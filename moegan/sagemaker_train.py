@@ -193,8 +193,8 @@ def main():
         
         # Load training dataset (USING ONLY 50% OF DATA FOR FASTER TRAINING)
         print("Loading training data from {} and {}".format(train_img_path, train_emb_path))
-        train_dataset = SimpleDataset(train_img_path, train_emb_path, use_percentage=0.9)
-        print("Loaded {} training samples (50% of total)".format(len(train_dataset)))
+        train_dataset = SimpleDataset(train_img_path, train_emb_path, use_percentage=0.2)
+        print("Loaded {} training samples (20% of total)".format(len(train_dataset)))
         
         # Setup CloudWatch metrics
         cloudwatch = boto3.client('cloudwatch', region_name=os.environ.get('AWS_REGION', 'us-west-2'))
