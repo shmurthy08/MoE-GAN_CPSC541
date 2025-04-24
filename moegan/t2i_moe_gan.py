@@ -679,6 +679,67 @@ class AuroraGenerator(nn.Module):
         # To RGB layers for different resolutions
         self.to_rgb_32 = ModulatedConv(64, 3, kernel_size=1)
         self.to_rgb_64 = ModulatedConv(32, 3, kernel_size=1)
+        self.active_resolutions = {4, 8, 16, 32, 64}
+        self.original_block_methods = None  # Will store original methods
+    
+    def set_active_resolutions(self, active_resolutions):
+        """
+        Set which resolution blocks are active during training
+        
+        Args:
+            active_resolutions: List of resolutions to activate [4, 8, 16, 32, 64]
+        """
+        self.active_resolutions = set(active_resolutions)
+        print(f"Active resolutions set to: {sorted(list(self.active_resolutions))}")
+        
+        # Store original forward methods if not already stored
+        if not hasattr(self, 'original_block_methods'):
+            self.original_block_methods = {
+                4: self._block_4_fn,
+                8: self._block_8_fn,
+                16: self._block_16_fn,
+                32: self._block_32_fn,
+                64: self._block_64_fn
+            }
+        
+        # Replace methods that should be frozen with no-grad versions
+        for res in [4, 8, 16, 32, 64]:
+            if res in self.active_resolutions:
+                # Use original method
+                if res == 4:
+                    self._block_4_fn = self.original_block_methods[4]
+                elif res == 8:
+                    self._block_8_fn = self.original_block_methods[8]
+                elif res == 16:
+                    self._block_16_fn = self.original_block_methods[16]
+                elif res == 32:
+                    self._block_32_fn = self.original_block_methods[32]
+                elif res == 64:
+                    self._block_64_fn = self.original_block_methods[64]
+            else:
+                # Create frozen version of the method
+                if res == 4:
+                    self._block_4_fn = self._create_frozen_block(4)
+                elif res == 8:
+                    self._block_8_fn = self._create_frozen_block(8)
+                elif res == 16:
+                    self._block_16_fn = self._create_frozen_block(16)
+                elif res == 32:
+                    self._block_32_fn = self._create_frozen_block(32)
+                elif res == 64:
+                    self._block_64_fn = self._create_frozen_block(64)
+
+    def _create_frozen_block(self, resolution):
+        """Create a frozen version of a resolution block that doesn't compute gradients"""
+        original_fn = self.original_block_methods[resolution]
+        
+        def frozen_block_fn(x, w, text_seq, kl_losses, annealing_factor=1.0):
+            with torch.no_grad():
+                return original_fn(x, w, text_seq, kl_losses, annealing_factor)
+        
+        return frozen_block_fn
+
+    
     
     def enable_checkpointing(self):
         """Enable gradient checkpointing to save memory"""
@@ -1389,6 +1450,473 @@ def train_aurora_gan(
     
     print(f"Final model saved to {final_save_path}")
 
+    return generator, discriminator
+
+
+def progressive_train_aurora_gan(
+    dataloader, val_dataloader=None,
+    num_epochs=50, lr=0.0002, beta1=0.5, beta2=0.999,
+    r1_gamma=10.0,
+    clip_weight_64=0.1,
+    clip_weight_32=0.05,
+    kl_weight=0.001,
+    kl_annealing_epochs=3,
+    balance_weight=0.01,
+    device=DEVICE, save_dir='./aurora_checkpoints',
+    log_interval=10, save_interval=1000,
+    metric_callback=None,
+    use_amp=True,
+    gradient_accumulation_steps=4,
+    checkpoint_activation=True,
+    batch_memory_limit=10.0,
+    # Progressive training parameters
+    progressive_schedule=None
+):
+    """
+    Train the Aurora GAN with progressive resolution increases.
+    
+    Args:
+        progressive_schedule: List of (resolution_list, epoch_fraction) tuples
+            Example: [
+                ([4, 8], 0.3),       # Train 4×4 and 8×8 for 30% of epochs
+                ([4, 8, 16], 0.2),    # Add 16×16 for next 20%
+                ([4, 8, 16, 32], 0.25), # Add 32×32 for next 25%
+                ([4, 8, 16, 32, 64], 0.25) # Full model for final 25%
+            ]
+        
+        Other parameters: Same as train_aurora_gan
+    """
+    # Use default progressive schedule if not provided
+    if progressive_schedule is None:
+        progressive_schedule = [
+            ([4, 8], 0.3),            # Train 4×4 and 8×8 for 30% of epochs
+            ([4, 8, 16], 0.2),        # Add 16×16 for next 20%
+            ([4, 8, 16, 32], 0.25),   # Add 32×32 for next 25%
+            ([4, 8, 16, 32, 64], 0.25) # Full model for final 25%
+        ]
+    
+    # Create save directory
+    os.makedirs(save_dir, exist_ok=True)
+
+    # Initialize models
+    generator = AuroraGenerator().to(device)
+    discriminator = AuroraDiscriminator().to(device)
+    
+    # Enable gradient checkpointing to save memory
+    if checkpoint_activation and hasattr(generator, 'enable_checkpointing'):
+        logger.info("Enabling gradient checkpointing for memory efficiency")
+        generator.enable_checkpointing()
+    
+    # Initialize optimizers
+    weight_decay = 0.01
+    optimizer_g = torch.optim.AdamW(generator.parameters(), lr=lr, betas=(beta1, beta2), weight_decay=weight_decay)
+    optimizer_d = torch.optim.AdamW(discriminator.parameters(), lr=lr, betas=(beta1, beta2), weight_decay=weight_decay)
+
+    # Initialize AMP scaler for mixed precision training
+    scaler = torch.cuda.amp.GradScaler() if use_amp and torch.cuda.is_available() else None
+    
+    # Initialize loss function
+    gan_loss = AuroraGANLoss(device)
+    
+    # Calculate epochs for each phase based on fractions
+    total_epochs_processed = 0
+    phase_epochs = []
+    for _, fraction in progressive_schedule:
+        phase_epochs.append(max(1, int(num_epochs * fraction)))
+    
+    # Adjust to ensure we use exactly num_epochs
+    if sum(phase_epochs) != num_epochs:
+        # Add or subtract from last phase
+        phase_epochs[-1] += (num_epochs - sum(phase_epochs))
+    
+    # Training loop with progressive phases
+    step = 0
+    for phase_idx, (active_resolutions, _) in enumerate(progressive_schedule):
+        phase_start_epoch = total_epochs_processed
+        phase_end_epoch = phase_start_epoch + phase_epochs[phase_idx]
+        
+        print(f"\n{'='*50}")
+        print(f"Starting Phase {phase_idx+1}: Resolutions {active_resolutions}")
+        print(f"Training for {phase_epochs[phase_idx]} epochs ({phase_start_epoch+1}-{phase_end_epoch})")
+        print(f"{'='*50}\n")
+        
+        # Set active resolutions for this phase
+        generator.set_active_resolutions(active_resolutions)
+        
+        # Train for this phase
+        for epoch in range(phase_start_epoch, phase_end_epoch):
+            print(f"Starting epoch {epoch+1}/{num_epochs}")
+            
+            # KL annealing based on current phase, not global epoch
+            phase_epoch = epoch - phase_start_epoch
+            phase_epochs_total = phase_end_epoch - phase_start_epoch
+            
+            # Calculate annealing factors specific to phase
+            temperature_factor = max(1.0, 3.0 - phase_epoch * (2.0 / max(1, phase_epochs_total))) 
+            kl_warmup_factor = min(1.0, phase_epoch / min(kl_annealing_epochs, phase_epochs_total))
+            effective_kl_weight = kl_weight * kl_warmup_factor
+            
+            print(f"  Phase {phase_idx+1} Epoch {phase_epoch+1}/{phase_epochs_total}")
+            print(f"  Temperature factor: {temperature_factor:.2f}")
+            print(f"  KL warmup factor: {kl_warmup_factor:.3f}")
+            print(f"  Effective KL weight: {effective_kl_weight:.8f}")
+            
+            # ==== TRAINING EPOCH LOOP - From original train_aurora_gan ====
+            epoch_pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{num_epochs}")
+            
+            running_d_loss = 0.0
+            running_g_loss = 0.0
+            running_r1_loss = 0.0
+            running_kl_loss = 0.0
+            running_balance_loss = 0.0
+            running_clip_loss_64 = 0.0
+            running_clip_loss_32 = 0.0
+            
+            # Reset gradients at start of epoch
+            optimizer_d.zero_grad()
+            optimizer_g.zero_grad()
+
+            for batch_idx, (real_images, text_embeddings) in enumerate(epoch_pbar):
+                batch_size = real_images.size(0)
+                
+                # Check memory limit if specified
+                if batch_memory_limit and torch.cuda.is_available():
+                    current_memory = torch.cuda.memory_allocated() / 1e9  # Convert to GB
+                    if current_memory > batch_memory_limit:
+                        logger.warning(f"Memory limit exceeded: {current_memory:.2f}GB > {batch_memory_limit}GB")
+                        logger.warning("Skipping batch to prevent OOM error")
+                        torch.cuda.empty_cache()
+                        continue
+
+                # Move data to device
+                real_images = real_images.to(device)
+                text_embeddings = text_embeddings.to(device)
+
+                # Sample random noise
+                z = torch.randn(batch_size, LATENT_DIM, device=device)
+
+                # ------------------------
+                # Train Discriminator
+                # ------------------------
+                # We don't need to zero gradients every step with gradient accumulation
+                if batch_idx % gradient_accumulation_steps == 0:
+                    optimizer_d.zero_grad()
+
+                # --- Real images (Matching) ---
+                # Enable gradient computation for R1 penalty
+                real_images.requires_grad = True
+                
+                with torch.cuda.amp.autocast() if use_amp else nullcontext():
+                    real_pred = discriminator(real_images, text_embeddings)
+
+                    # --- R1 Regularization ---
+                    grad_real, = torch.autograd.grad(
+                        outputs=real_pred.sum(), inputs=real_images, create_graph=True
+                    )
+                    grad_penalty = grad_real.view(grad_real.size(0), -1).norm(2, dim=1) ** 2
+                    r1_loss = (r1_gamma / 2) * grad_penalty.mean() # Divide gamma by 2, common practice
+
+                    # --- Fake images ---
+                    with torch.no_grad():
+                        # Request intermediate output for multi-level CLIP later
+                        # Note: generator returns final_image, intermediate_image, kl_loss, routing_probs
+                        fake_images_64, fake_images_32, _, _ = generator(
+                            z, 
+                            text_embeddings, 
+                            return_intermediate=True, 
+                            return_routing=True,
+                            annealing_factor=temperature_factor  # Pass temperature factor
+                        )
+                    fake_pred = discriminator(fake_images_64.detach(), text_embeddings) # Use final fake image
+
+                    # --- Mismatched real images/text ---
+                    # Simple shuffle within the batch for mismatching
+                    shuffled_indices = torch.randperm(batch_size)
+                    mismatched_text_embeddings = text_embeddings[shuffled_indices]
+                    mismatched_pred = discriminator(real_images.detach(), mismatched_text_embeddings) # Use detached real images
+
+                    # --- Discriminator loss (includes matching-aware) ---
+                    # Loss now includes real, fake, and mismatched terms
+                    d_loss_gan = gan_loss.discriminator_loss(real_pred, fake_pred, mismatched_pred)
+
+                    # Total Discriminator Loss
+                    d_loss = d_loss_gan + r1_loss
+                
+                # Scale the loss if using AMP
+                if scaler:
+                    scaler.scale(d_loss / gradient_accumulation_steps).backward()
+                else:
+                    (d_loss / gradient_accumulation_steps).backward()
+                
+                # Only step optimizer after accumulating gradients
+                if (batch_idx + 1) % gradient_accumulation_steps == 0 or (batch_idx + 1) == len(dataloader):
+                    if scaler:
+                        # Clip before scaler step
+                        scaler.unscale_(optimizer_d)
+                        torch.nn.utils.clip_grad_norm_(discriminator.parameters(), max_norm=1.0)
+                        scaler.step(optimizer_d)
+                        scaler.update()
+                    else:
+                        torch.nn.utils.clip_grad_norm_(discriminator.parameters(), max_norm=1.0)
+                        optimizer_d.step()
+
+                # ------------------------
+                # Train Generator
+                # ------------------------
+                if batch_idx % gradient_accumulation_steps == 0:
+                    optimizer_g.zero_grad()
+
+                with torch.cuda.amp.autocast() if use_amp else nullcontext():
+                    # Generate fake images, get intermediate, KL loss, and routing probs
+                    fake_images_64, fake_images_32, kl_loss, routing_probs = generator(
+                        z, 
+                        text_embeddings, 
+                        return_intermediate=True, 
+                        return_routing=True,
+                        annealing_factor=temperature_factor  # Pass temperature factor
+                    )
+
+                    # Apply safe handling to KL loss
+                    if kl_loss is not None:
+                        # Detect and prevent extreme KL values
+                        if torch.isnan(kl_loss) or torch.isinf(kl_loss):
+                            print(f"⚠️ NaN/Inf detected in KL loss! Replacing with zero.")
+                            kl_loss = torch.tensor(0.0, device=device)
+                        elif kl_loss > 100.0:
+                            print(f"⚠️ Extremely high KL detected: {kl_loss.item():.2f}, clamping to 100.0")
+                            kl_loss = torch.tensor(100.0, device=device)
+                            
+                    # Discriminator prediction on fake images (use final resolution)
+                    fake_pred_g = discriminator(fake_images_64, text_embeddings) # Use G's output directly
+
+                    # --- Generator Adversarial Loss ---
+                    g_loss_gan = gan_loss.generator_loss(fake_pred_g)
+
+                    # --- Multi-level CLIP Loss ---
+                    clip_loss_64 = gan_loss.compute_clip_loss(fake_images_64, text_embeddings)
+                    clip_loss_32 = gan_loss.compute_clip_loss(fake_images_32, text_embeddings) # CLIP loss on 32x32
+                    g_loss_clip = (clip_weight_64 * clip_loss_64) + (clip_weight_32 * clip_loss_32)
+
+                    # --- MoE Balance Loss ---
+                    balance_loss = gan_loss.moe_balance_loss(routing_probs, balance_weight=balance_weight)
+
+                    # --- Total Generator Loss ---
+                    g_loss = g_loss_gan + g_loss_clip + balance_loss + (effective_kl_weight * kl_loss)
+                
+                # Scale the loss if using AMP
+                if scaler:
+                    scaler.scale(g_loss / gradient_accumulation_steps).backward()
+                else:
+                    (g_loss / gradient_accumulation_steps).backward()
+                
+                # Only step optimizer after accumulating gradients
+                if (batch_idx + 1) % gradient_accumulation_steps == 0 or (batch_idx + 1) == len(dataloader):
+                    if scaler:
+                        # Clip before scaler step
+                        scaler.unscale_(optimizer_g)
+                        torch.nn.utils.clip_grad_norm_(generator.parameters(), max_norm=1.0)
+                        scaler.step(optimizer_g)
+                        scaler.update()
+                    else:
+                        torch.nn.utils.clip_grad_norm_(generator.parameters(), max_norm=1.0)
+                        optimizer_g.step()
+
+                # Update running losses for progress bar
+                running_d_loss = 0.9 * running_d_loss + 0.1 * d_loss_gan.item() # Track gan part of D loss
+                running_r1_loss = 0.9 * running_r1_loss + 0.1 * r1_loss.item()
+                running_g_loss = 0.9 * running_g_loss + 0.1 * g_loss_gan.item() # Track gan part of G loss
+                running_kl_loss = 0.9 * running_kl_loss + 0.1 * kl_loss.item() if kl_loss is not None else running_kl_loss
+                running_balance_loss = 0.9 * running_balance_loss + 0.1 * balance_loss.item()
+                running_clip_loss_64 = 0.9 * running_clip_loss_64 + 0.1 * clip_loss_64.item()
+                running_clip_loss_32 = 0.9 * running_clip_loss_32 + 0.1 * clip_loss_32.item()
+
+                # Update progress bar description with loss values
+                epoch_pbar.set_postfix({
+                    'D_loss': f'{running_d_loss:.3f}',
+                    'R1': f'{running_r1_loss:.3f}',
+                    'G_loss': f'{running_g_loss:.3f}',
+                    'KL': f'{running_kl_loss:.4f}',
+                    'Balance': f'{running_balance_loss:.4f}',
+                    'Clip64': f'{running_clip_loss_64:.3f}',
+                    'Clip32': f'{running_clip_loss_32:.3f}',
+                })
+
+                # Logging
+                if step % log_interval == 0:
+                    logger.info(f"\nStep [{step}] Epoch [{epoch+1}] Batch [{batch_idx}/{len(dataloader)}] "
+                          f"D_loss: {d_loss.item():.4f} (GAN: {d_loss_gan.item():.4f}, R1: {r1_loss.item():.4f}), "
+                          f"G_loss: {g_loss.item():.4f} (GAN: {g_loss_gan.item():.4f}, Clip64: {clip_loss_64.item():.4f}, "
+                          f"Clip32: {clip_loss_32.item():.4f}, KL: {kl_loss.item():.4f}, Balance: {balance_loss.item():.4f})")
+
+                # Save models at step intervals
+                if step % save_interval == 0 and step > 0:
+                    # Clean GPU memory before saving to avoid OOM
+                    torch.cuda.empty_cache()
+                    
+                    checkpoint_path = os.path.join(save_dir, f"aurora_checkpoint_{step}.pt")
+                    torch.save({
+                        'generator': generator.state_dict(),
+                        'discriminator': discriminator.state_dict(),
+                        'optimizer_g': optimizer_g.state_dict(),
+                        'optimizer_d': optimizer_d.state_dict(),
+                        'epoch': epoch,
+                        'step': step
+                    }, checkpoint_path)
+                    print(f"Checkpoint saved to {checkpoint_path}")
+                    
+                step += 1
+
+            # Close the progress bar for this epoch
+            epoch_pbar.close()
+
+            # ===== VALIDATION SECTION - From original train_aurora_gan =====
+            if val_dataloader is not None:
+                generator.eval()
+                discriminator.eval()
+
+                val_g_loss_gan = 0
+                val_d_loss_gan = 0
+                val_clip_loss_64 = 0
+                val_clip_loss_32 = 0
+                val_samples = 0
+
+                print("Running validation...")
+                val_pbar = tqdm(val_dataloader, desc=f"Validation Epoch {epoch+1}")
+
+                with torch.no_grad():
+                    for val_real_images, val_text_embeddings in val_pbar:
+                        val_batch_size = val_real_images.size(0)
+                        val_samples += val_batch_size
+
+                        val_real_images = val_real_images.to(device)
+                        val_text_embeddings = val_text_embeddings.to(device)
+                        val_z = torch.randn(val_batch_size, LATENT_DIM, device=device)
+
+                        # Free up some memory before validation step
+                        torch.cuda.empty_cache()
+                        
+                        # Real images
+                        val_real_pred = discriminator(val_real_images, val_text_embeddings)
+
+                        # Fake images - Pass temperature factor here too
+                        val_fake_images_64, val_fake_images_32, val_kl_loss = generator(
+                            val_z, 
+                            val_text_embeddings, 
+                            return_intermediate=True,
+                            annealing_factor=temperature_factor
+                        )
+
+                        # Fake images prediction
+                        val_fake_pred = discriminator(val_fake_images_64, val_text_embeddings)
+
+                        # Mismatched prediction
+                        val_shuffled_indices = torch.randperm(val_batch_size)
+                        val_mismatched_text = val_text_embeddings[val_shuffled_indices]
+                        val_mismatched_pred = discriminator(val_real_images, val_mismatched_text)
+
+                        # Losses
+                        batch_d_loss = gan_loss.discriminator_loss(
+                            val_real_pred, val_fake_pred, val_mismatched_pred
+                        ).item()
+                        
+                        batch_g_loss = gan_loss.generator_loss(
+                            val_fake_pred, val_kl_loss, kl_weight=effective_kl_weight
+                        ).item()
+                        
+                        batch_clip_loss_64 = gan_loss.compute_clip_loss(
+                            val_fake_images_64, val_text_embeddings
+                        ).item()
+                        
+                        batch_clip_loss_32 = gan_loss.compute_clip_loss(
+                            val_fake_images_32, val_text_embeddings
+                        ).item()
+
+                        val_d_loss_gan += batch_d_loss * val_batch_size
+                        val_g_loss_gan += batch_g_loss * val_batch_size
+                        val_clip_loss_64 += batch_clip_loss_64 * val_batch_size
+                        val_clip_loss_32 += batch_clip_loss_32 * val_batch_size
+
+                        val_pbar.set_postfix({
+                            'D_loss': f'{batch_d_loss:.4f}',
+                            'G_loss': f'{batch_g_loss:.4f}',
+                            'Clip64': f'{batch_clip_loss_64:.4f}',
+                            'Clip32': f'{batch_clip_loss_32:.4f}'
+                        })
+
+                val_pbar.close()
+
+                # Average losses
+                if val_samples > 0:
+                    val_d_loss_gan /= val_samples
+                    val_g_loss_gan /= val_samples
+                    val_clip_loss_64 /= val_samples
+                    val_clip_loss_32 /= val_samples
+
+                    # Collect metrics for reporting
+                    val_metrics = {
+                        'val_d_loss': val_d_loss_gan,
+                        'val_g_loss': val_g_loss_gan,
+                        'val_clip_loss_64': val_clip_loss_64,
+                        'val_clip_loss_32': val_clip_loss_32,
+                        'val_clip_loss': val_clip_loss_64  # Primary metric for HPO
+                    }
+
+                    print(f"Validation Results - D_loss: {val_d_loss_gan:.4f}, G_loss: {val_g_loss_gan:.4f}, "
+                         f"Clip_Loss_64: {val_clip_loss_64:.4f}, Clip_Loss_32: {val_clip_loss_32:.4f}")
+                    
+                    # Call the metric callback if provided
+                    if metric_callback:
+                        if not metric_callback(epoch, val_metrics):
+                            # If the callback returns False, stop training
+                            print("Early stopping triggered by metric callback")
+                            break
+
+                generator.train()
+                discriminator.train()
+
+            # Save model after each epoch
+            # epoch_save_path = os.path.join(save_dir, f"aurora_checkpoint_epoch_{epoch+1}.pt")
+            # torch.save({
+            #     'generator': generator.state_dict(),
+            #     'discriminator': discriminator.state_dict(),
+            #     'optimizer_g': optimizer_g.state_dict(),
+            #     'optimizer_d': optimizer_d.state_dict(),
+            #     'epoch': epoch + 1,
+            #     'step': step
+            # }, epoch_save_path)
+            
+            # print(f"Checkpoint saved to {epoch_save_path}")
+            
+        # At the end of phase, save a phase checkpoint
+        # phase_save_path = os.path.join(save_dir, f"phase_{phase_idx+1}_checkpoint.pt")
+        # torch.save({
+        #     'generator': generator.state_dict(),
+        #     'discriminator': discriminator.state_dict(),
+        #     'optimizer_g': optimizer_g.state_dict(),
+        #     'optimizer_d': optimizer_d.state_dict(),
+        #     'phase': phase_idx + 1,
+        #     'epoch': phase_end_epoch,
+        #     'step': step
+        # }, phase_save_path)
+        # print(f"Phase {phase_idx+1} checkpoint saved to {phase_save_path}")
+                
+        # Update total epochs processed
+        total_epochs_processed = phase_end_epoch
+    
+    # Save final model
+    # torch.cuda.empty_cache()
+    # final_save_path = os.path.join(save_dir, "aurora_final.pt")
+    # torch.save({
+    #     'generator': generator.state_dict(),
+    #     'discriminator': discriminator.state_dict(),
+    #     'optimizer_g': optimizer_g.state_dict(),
+    #     'optimizer_d': optimizer_d.state_dict(),
+    #     'epoch': num_epochs,
+    #     'step': step
+    # }, final_save_path)
+    
+    # print(f"Final model saved to {final_save_path}")
+    
     return generator, discriminator
 
 

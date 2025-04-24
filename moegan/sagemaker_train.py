@@ -68,7 +68,7 @@ class SimpleDataset(Dataset):
 
 # Import GAN components
 try:
-    from t2i_moe_gan import train_aurora_gan, AuroraGenerator, AuroraDiscriminator
+    from t2i_moe_gan import train_aurora_gan, progressive_train_aurora_gan, AuroraGenerator, AuroraDiscriminator
     print("✓ Successfully imported GAN components")
 except ImportError as e:
     print("Error importing GAN components: {}".format(str(e)))
@@ -262,7 +262,35 @@ def main():
             return True
             
         # Train model with the metric reporting callback
-        generator, discriminator = train_aurora_gan(
+        # generator, discriminator = train_aurora_gan(
+        #     train_dataloader, 
+        #     val_dataloader=val_dataloader,
+        #     num_epochs=params.get('epochs', 5),
+        #     lr=params.get('learning_rate', 0.0002),
+        #     beta1=params.get('beta1', 0.5),
+        #     beta2=params.get('beta2', 0.999),
+        #     r1_gamma=params.get('r1_gamma', 10.0),
+        #     clip_weight_64=params.get('clip_weight_64', 0.1),
+        #     clip_weight_32=params.get('clip_weight_32', 0.05),
+        #     kl_weight=params.get('kl_weight', 0.001),
+        #     kl_annealing_epochs=params.get('kl_annealing_epochs', 1),
+        #     balance_weight=params.get('balance_weight', 0.01),
+        #     device=device,
+        #     save_dir=save_dir,
+        #     log_interval=100,
+        #     save_interval=500,
+        #     metric_callback=metric_callback,
+        #     gradient_accumulation_steps=9,
+        #     checkpoint_activation=True,
+        #     batch_memory_limit=10.0
+        # )
+        progressive_schedule = [
+            ([4, 8], 0.25),            # First 25% of epochs: train 4x4 and 8x8 only
+            ([4, 8, 16], 0.25),        # Next 25%: add 16x16
+            ([4, 8, 16, 32], 0.25),    # Next 25%: add 32x32
+            ([4, 8, 16, 32, 64], 0.25) # Final 25%: full 64x64 model
+        ]
+        generator, discriminator = progressive_train_aurora_gan(
             train_dataloader, 
             val_dataloader=val_dataloader,
             num_epochs=params.get('epochs', 5),
@@ -282,7 +310,8 @@ def main():
             metric_callback=metric_callback,
             gradient_accumulation_steps=9,
             checkpoint_activation=True,
-            batch_memory_limit=10.0
+            batch_memory_limit=10.0,
+            progressive_schedule=progressive_schedule
         )
         
         # Save final model 
