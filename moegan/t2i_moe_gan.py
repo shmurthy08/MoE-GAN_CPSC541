@@ -966,11 +966,12 @@ class AuroraGANLoss:
         self.device = device
         self.clip_loss_fn = CLIPLoss(device) # Renamed to avoid conflict
 
-    def generator_loss(self, fake_pred):
+    def generator_loss(self, fake_pred, kl_loss=None, kl_weight=0.001):
         # Non-saturating GAN loss for generator (wants D to output high for fake images)
         g_loss = F.softplus(-fake_pred).mean()
 
         # Note: CLIP loss is handled separately in the training loop now for multi-level
+        g_loss = g_loss + kl_weight * kl_loss if kl_loss is not None else g_loss
 
         return g_loss
 
