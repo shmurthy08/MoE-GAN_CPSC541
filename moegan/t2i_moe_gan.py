@@ -966,13 +966,9 @@ class AuroraGANLoss:
         self.device = device
         self.clip_loss_fn = CLIPLoss(device) # Renamed to avoid conflict
 
-    def generator_loss(self, fake_pred, kl_loss=None, kl_weight=0.001):
+    def generator_loss(self, fake_pred):
         # Non-saturating GAN loss for generator (wants D to output high for fake images)
         g_loss = F.softplus(-fake_pred).mean()
-
-        # Add KL divergence loss if provided
-        if kl_loss is not None:
-            g_loss = g_loss + kl_weight * kl_loss
 
         # Note: CLIP loss is handled separately in the training loop now for multi-level
 
@@ -1230,10 +1226,10 @@ def train_aurora_gan(
                 if scaler:
                     # Clip before scaler step
                     scaler.unscale_(optimizer_d)
-                    torch.nn.utils.clip_grad_norm_(discriminator.parameters(), max_norm=1.0)
+                    torch.nn.utils.clip_grad_norm_(discriminator.parameters(), max_norm=0.8)
                     scaler.step(optimizer_d)
                 else:
-                    torch.nn.utils.clip_grad_norm_(discriminator.parameters(), max_norm=1.0)
+                    torch.nn.utils.clip_grad_norm_(discriminator.parameters(), max_norm=0.8)
                     optimizer_d.step()
                 
                 if scaler:
@@ -1273,7 +1269,13 @@ def train_aurora_gan(
                 balance_loss = gan_loss.moe_balance_loss(routing_probs, balance_weight=balance_weight)
 
                 # --- Total Generator Loss ---
-                g_loss = (g_loss_gan + g_loss_clip + balance_loss + (effective_kl_weight * kl_loss)) if kl_loss is not None else (g_loss_gan + g_loss_clip + balance_loss)
+                g_loss = g_loss_gan + g_loss_clip + balance_loss
+                
+                # Add KL loss separately to avoid tensor in boolean context
+                if kl_loss is not None:
+                    # Use item() if it's a scalar tensor or torch.is_tensor(kl_loss) to check
+                    kl_component = effective_kl_weight * kl_loss
+                    g_loss = g_loss + kl_component
             
             # Scale the loss if using AMP
             if scaler:
@@ -1286,10 +1288,10 @@ def train_aurora_gan(
                 if scaler:
                     # Clip before scaler step
                     scaler.unscale_(optimizer_g)
-                    torch.nn.utils.clip_grad_norm_(generator.parameters(), max_norm=1.0)
+                    torch.nn.utils.clip_grad_norm_(generator.parameters(), max_norm=0.8)
                     scaler.step(optimizer_g)
                 else:
-                    torch.nn.utils.clip_grad_norm_(generator.parameters(), max_norm=1.0)
+                    torch.nn.utils.clip_grad_norm_(generator.parameters(), max_norm=0.8)
                     optimizer_g.step()
                 
                 if scaler:
@@ -1451,17 +1453,17 @@ def train_aurora_gan(
     # Clean GPU memory first
     torch.cuda.empty_cache()
     
-    final_save_path = os.path.join(save_dir, "aurora_final.pt")
-    torch.save({
-        'generator': generator.state_dict(),
-        'discriminator': discriminator.state_dict(),
-        'optimizer_g': optimizer_g.state_dict(),
-        'optimizer_d': optimizer_d.state_dict(),
-        'epoch': num_epochs,
-        'step': step
-    }, final_save_path)
+    # final_save_path = os.path.join(save_dir, "aurora_final.pt")
+    # torch.save({
+    #     'generator': generator.state_dict(),
+    #     'discriminator': discriminator.state_dict(),
+    #     'optimizer_g': optimizer_g.state_dict(),
+    #     'optimizer_d': optimizer_d.state_dict(),
+    #     'epoch': num_epochs,
+    #     'step': step
+    # }, final_save_path)
     
-    print(f"Final model saved to {final_save_path}")
+    # print(f"Final model saved to {final_save_path}")
 
     return generator, discriminator
 
@@ -1533,14 +1535,48 @@ def progressive_train_aurora_gan(
     
     # Calculate epochs for each phase based on fractions
     total_epochs_processed = 0
-    phase_epochs = []
-    for _, fraction in progressive_schedule:
-        phase_epochs.append(max(1, int(num_epochs * fraction)))
-    
-    # Adjust to ensure we use exactly num_epochs
+    num_phases = len(progressive_schedule)
+    phase_epochs = [0] * num_phases # Initialize with zeros
+
+    ideal_epochs_float = [num_epochs * fraction for _, fraction in progressive_schedule]
+
+    # Assign the integer part first
+    for i in range(num_phases):
+        phase_epochs[i] = int(ideal_epochs_float[i]) # Use floor (int())
+
+    # Calculate remaining epochs
+    remaining_epochs = num_epochs - sum(phase_epochs)
+
+    # Distribute remaining epochs based on largest fractional part
+    # Calculate fractional parts
+    fractional_parts = [ideal - floor for ideal, floor in zip(ideal_epochs_float, phase_epochs)]
+
+    # Get indices sorted by fractional part descending
+    indices_sorted_by_fraction = sorted(range(num_phases), key=lambda k: fractional_parts[k], reverse=True)
+
+    # Distribute remainder to phases with largest fractions first
+    for i in range(remaining_epochs):
+        phase_index_to_increment = indices_sorted_by_fraction[i % num_phases] # Cycle through if remainder > num_phases (shouldn't happen if fractions sum to ~1)
+        phase_epochs[phase_index_to_increment] += 1
+
+    # Ensure minimum of 1 epoch per phase (optional, but good practice)
+    for i in range(num_phases):
+        if phase_epochs[i] == 0:
+             # This logic might need refinement if a phase gets 0 and needs epochs borrowed from others
+             # For simplicity, let's assume fractions are reasonable and this won't make the total exceed num_epochs significantly
+             logger.warning(f"Phase {i} calculated 0 epochs, setting to 1. Total epochs might exceed {num_epochs}.")
+             phase_epochs[i] = 1
+             # If strict adherence to num_epochs is needed, you'd need to decrement
+             # another phase, e.g., the longest one.
+
+    # Final check (optional, for debugging)
     if sum(phase_epochs) != num_epochs:
-        # Add or subtract from last phase
-        phase_epochs[-1] += (num_epochs - sum(phase_epochs))
+         logger.warning(f"Calculated phase epochs {phase_epochs} sum to {sum(phase_epochs)}, expected {num_epochs}. Adjusting last phase.")
+         # Fallback adjustment if the above logic still fails (e.g., due to min epoch enforcement)
+         diff = num_epochs - sum(phase_epochs)
+         phase_epochs[-1] += diff
+
+    print(f"Calculated phase epochs: {phase_epochs}") # Log the result
     
     # Training loop with progressive phases
     step = 0
@@ -1556,6 +1592,8 @@ def progressive_train_aurora_gan(
         # Set active resolutions for this phase
         generator.set_active_resolutions(active_resolutions)
         
+        original_lrs = []  # Store original learning rates for later restoration
+        original_lr_d = 0.0  # Store original D learning rate for later restoration
         # Reset optimizer state for newly activated blocks
         if phase_idx > 0:  # Skip for first phase
             # Get the highest resolution from previous phase
@@ -1591,6 +1629,15 @@ def progressive_train_aurora_gan(
                 param_group = {'params': new_params, 'lr': lr * 0.5}  # Half learning rate for new blocks
                 optimizer_g.add_param_group(param_group)
                 print(f"Added {len(new_params)} parameters to optimizer with reduced learning rate")
+                print(f"Phase transition: Temporarily reducing learning rates.")
+                for i, param_group in enumerate(optimizer_g.param_groups):
+                    original_lrs.append(param_group['lr'])
+                    # Reduce LR significantly, e.g., by 5x or 10x
+                    param_group['lr'] = param_group['lr'] / 5.0
+                    print(f"  Group {i} LR reduced to: {param_group['lr']:.6f}")
+                # Apply to discriminator too if needed
+                original_lr_d = optimizer_d.param_groups[0]['lr']
+                optimizer_d.param_groups[0]['lr'] = original_lr_d / 5.0
 
         
         # Train for this phase
@@ -1634,7 +1681,7 @@ def progressive_train_aurora_gan(
             print(f"  Effective KL weight: {effective_kl_weight:.8f}")
             
             # Adjust learning rates during the early epochs of a new phase
-            if phase_idx > 0 and phase_epoch < 5:  # First 5 epochs of phases after the first
+            if phase_idx > 0:  # First 5 epochs of phases after the first
                 warmup_factor = (phase_epoch + 1) / 5  # Gradual increase from 20% to 100%
                 
                 # Find param groups for newly added blocks
@@ -1740,11 +1787,11 @@ def progressive_train_aurora_gan(
                     if scaler:
                         # Clip before scaler step
                         scaler.unscale_(optimizer_d)
-                        torch.nn.utils.clip_grad_norm_(discriminator.parameters(), max_norm=1.0)
+                        torch.nn.utils.clip_grad_norm_(discriminator.parameters(), max_norm=0.8)
                         scaler.step(optimizer_d)
                         scaler.update()
                     else:
-                        torch.nn.utils.clip_grad_norm_(discriminator.parameters(), max_norm=1.0)
+                        torch.nn.utils.clip_grad_norm_(discriminator.parameters(), max_norm=0.8)
                         optimizer_d.step()
 
                 # ------------------------
@@ -1766,12 +1813,19 @@ def progressive_train_aurora_gan(
                     # Apply safe handling to KL loss
                     if kl_loss is not None:
                         # Detect and prevent extreme KL values
-                        if torch.isnan(kl_loss) or torch.isinf(kl_loss):
+                        # Check for NaN/Inf first using .item()
+                        if torch.isnan(kl_loss).item() or torch.isinf(kl_loss).item(): # Add .item()
                             print(f"⚠️ NaN/Inf detected in KL loss! Replacing with zero.")
-                            kl_loss = torch.tensor(0.0, device=device)
-                        elif kl_loss > 100.0:
+                            # Ensure kl_loss requires grad if it's part of the computation graph before replacement
+                            original_requires_grad = kl_loss.requires_grad
+                            kl_loss = torch.tensor(0.0, device=device, requires_grad=original_requires_grad)
+                        # Check magnitude using .item()
+                        elif (kl_loss > 100.0).item(): # Add .item()
                             print(f"⚠️ Extremely high KL detected: {kl_loss.item():.2f}, clamping to 100.0")
-                            kl_loss = torch.tensor(100.0, device=device)
+                            # Ensure kl_loss requires grad if it's part of the computation graph before replacement
+                            original_requires_grad = kl_loss.requires_grad
+                            kl_loss = torch.tensor(100.0, device=device, requires_grad=original_requires_grad)
+
                             
                     # Discriminator prediction on fake images (use final resolution)
                     fake_pred_g = discriminator(fake_images_64, text_embeddings) # Use G's output directly
@@ -1788,7 +1842,13 @@ def progressive_train_aurora_gan(
                     balance_loss = gan_loss.moe_balance_loss(routing_probs, balance_weight=balance_weight)
 
                     # --- Total Generator Loss ---
-                    g_loss = g_loss_gan + g_loss_clip + balance_loss + (effective_kl_weight * kl_loss)
+                    g_loss = g_loss_gan + g_loss_clip + balance_loss
+                    
+                    # Add KL loss separately to avoid tensor in boolean context
+                    if kl_loss is not None:
+                        # Use item() if it's a scalar tensor or torch.is_tensor(kl_loss) to check
+                        kl_component = effective_kl_weight * kl_loss
+                        g_loss = g_loss + kl_component
                 
                 # Scale the loss if using AMP
                 if scaler:
@@ -1801,11 +1861,11 @@ def progressive_train_aurora_gan(
                     if scaler:
                         # Clip before scaler step
                         scaler.unscale_(optimizer_g)
-                        torch.nn.utils.clip_grad_norm_(generator.parameters(), max_norm=1.0)
+                        torch.nn.utils.clip_grad_norm_(generator.parameters(), max_norm=0.8)
                         scaler.step(optimizer_g)
                         scaler.update()
                     else:
-                        torch.nn.utils.clip_grad_norm_(generator.parameters(), max_norm=1.0)
+                        torch.nn.utils.clip_grad_norm_(generator.parameters(), max_norm=0.8)
                         optimizer_g.step()
 
                 # Update running losses for progress bar
@@ -1836,25 +1896,31 @@ def progressive_train_aurora_gan(
                           f"Clip32: {clip_loss_32.item():.4f}, KL: {kl_loss.item():.4f}, Balance: {balance_loss.item():.4f})")
 
                 # Save models at step intervals
-                if step % save_interval == 0 and step > 0:
-                    # Clean GPU memory before saving to avoid OOM
-                    torch.cuda.empty_cache()
+                # if step % save_interval == 0 and step > 0:
+                #     # Clean GPU memory before saving to avoid OOM
+                #     torch.cuda.empty_cache()
                     
-                    checkpoint_path = os.path.join(save_dir, f"aurora_checkpoint_{step}.pt")
-                    torch.save({
-                        'generator': generator.state_dict(),
-                        'discriminator': discriminator.state_dict(),
-                        'optimizer_g': optimizer_g.state_dict(),
-                        'optimizer_d': optimizer_d.state_dict(),
-                        'epoch': epoch,
-                        'step': step
-                    }, checkpoint_path)
-                    print(f"Checkpoint saved to {checkpoint_path}")
+                #     checkpoint_path = os.path.join(save_dir, f"aurora_checkpoint_{step}.pt")
+                #     torch.save({
+                #         'generator': generator.state_dict(),
+                #         'discriminator': discriminator.state_dict(),
+                #         'optimizer_g': optimizer_g.state_dict(),
+                #         'optimizer_d': optimizer_d.state_dict(),
+                #         'epoch': epoch,
+                #         'step': step
+                #     }, checkpoint_path)
+                #     print(f"Checkpoint saved to {checkpoint_path}")
                     
                 step += 1
 
             # Close the progress bar for this epoch
             epoch_pbar.close()
+            if phase_idx > 0 and epoch == phase_start_epoch: # If first epoch of a new phase (after phase 0)
+                print(f"Restoring learning rates after initial adaptation.")
+                for i, param_group in enumerate(optimizer_g.param_groups):
+                    param_group['lr'] = original_lrs[i] # Restore from saved values
+                    print(f"  Group {i} LR restored to: {param_group['lr']:.6f}")
+                optimizer_d.param_groups[0]['lr'] = original_lr_d
 
             # ===== VALIDATION SECTION - From original train_aurora_gan =====
             if val_dataloader is not None:
