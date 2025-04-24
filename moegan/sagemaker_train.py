@@ -279,7 +279,7 @@ def main():
             log_interval=50,
             save_interval=500,
             metric_callback=metric_callback,
-            gradient_accumulation_steps=2,
+            gradient_accumulation_steps=8,
             checkpoint_activation=True,
             batch_memory_limit=10.0
         )

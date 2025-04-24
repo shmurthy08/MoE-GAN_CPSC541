@@ -1055,8 +1055,10 @@ def train_aurora_gan(
             # Only step optimizer after accumulating gradients
             if (batch_idx + 1) % gradient_accumulation_steps == 0 or (batch_idx + 1) == len(dataloader):
                 if scaler:
+                    torch.nn.utils.clip_grad_norm_(discriminator.parameters(), max_norm=1.0)
                     scaler.step(optimizer_d)
                 else:
+                    torch.nn.utils.clip_grad_norm_(generator.parameters(), max_norm=1.0)
                     optimizer_d.step()
                 
                 if scaler:
@@ -1098,8 +1100,10 @@ def train_aurora_gan(
             # Only step optimizer after accumulating gradients
             if (batch_idx + 1) % gradient_accumulation_steps == 0 or (batch_idx + 1) == len(dataloader):
                 if scaler:
+                    torch.nn.utils.clip_grad_norm_(generator.parameters(), max_norm=1.0)
                     scaler.step(optimizer_g)
                 else:
+                    torch.nn.utils.clip_grad_norm_(generator.parameters(), max_norm=1.0)
                     optimizer_g.step()
                 
                 if scaler:
