@@ -193,7 +193,7 @@ def main():
         
         # Load training dataset (USING ONLY 50% OF DATA FOR FASTER TRAINING)
         print("Loading training data from {} and {}".format(train_img_path, train_emb_path))
-        train_dataset = SimpleDataset(train_img_path, train_emb_path, use_percentage=0.5)
+        train_dataset = SimpleDataset(train_img_path, train_emb_path, use_percentage=0.9)
         print("Loaded {} training samples (50% of total)".format(len(train_dataset)))
         
         # Setup CloudWatch metrics
