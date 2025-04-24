@@ -693,7 +693,8 @@ class AuroraGenerator(nn.Module):
         print(f"Active resolutions set to: {sorted(list(self.active_resolutions))}")
         
         # Store original forward methods if not already stored
-        if not hasattr(self, 'original_block_methods'):
+        # Initialize original_block_methods if not already done because on first call it will be None
+        if not hasattr(self, 'original_block_methods') or self.original_block_methods is None:
             self.original_block_methods = {
                 4: self._block_4_fn,
                 8: self._block_8_fn,
