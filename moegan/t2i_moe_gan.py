@@ -764,15 +764,40 @@ class AuroraGenerator(nn.Module):
             text_embeddings = text_or_embeddings
         return text_embeddings
     
-    def _run_block_with_checkpoint(self, block_fn, x, w, text_seq, kl_losses, annealing_factor=1.0):
+    def _run_block_with_checkpoint(self, block_fn, resolution, x, w, text_seq, kl_losses, annealing_factor=1.0):
         """Run a generative block with optional gradient checkpointing"""
-        if self._use_checkpointing and self.training:
-            return torch.utils.checkpoint.checkpoint(
-                block_fn,
-                x, w, text_seq, kl_losses, annealing_factor
-            )
+        should_checkpoint = (
+            self._use_checkpointing and
+            self.training and
+            resolution in self.active_resolutions
+        )
+        if should_checkpoint:
+            # Only apply checkpointing if the block is supposed to be trained
+            try:
+                # Define a wrapper that matches the original signature expected by checkpoint
+                def _checkpoint_wrapper(_x, _w, _text_seq, _kl_losses, _annealing_factor):
+                    output, routing_probs = block_fn(_x, _w, _text_seq, _kl_losses, _annealing_factor)
+                    # Note: kl_losses is modified in-place by attn_block. Checkpoint usually handles this, but returning might be safer.
+                    return output, routing_probs # Return all outputs needed later
+
+                # Run checkpoint with the wrapper
+                # Consider use_reentrant=False for potential memory savings if compatible
+                output, routing_probs = torch.utils.checkpoint.checkpoint(
+                    _checkpoint_wrapper,
+                    x, w, text_seq, kl_losses, annealing_factor,
+                    use_reentrant=False # Recommended if compatible
+                )
+                return output, routing_probs
+
+            except Exception as e:
+                logger.error(f"Checkpointing failed for resolution {resolution}: {e}")
+                logger.error("Falling back to non-checkpointed execution for this block.")
+                # Fallback to direct execution if checkpointing fails
+                return block_fn(x, w, text_seq, kl_losses, annealing_factor)
         else:
+            # Execute directly if not checkpointing (either disabled, eval mode, or inactive/frozen block)
             return block_fn(x, w, text_seq, kl_losses, annealing_factor)
+
     
     def _block_4_fn(self, x, w, text_seq, kl_losses, annealing_factor=1.0):
         # Pass annealing_factor to gen_block_4
@@ -841,31 +866,18 @@ class AuroraGenerator(nn.Module):
         x = self.constant.repeat(batch_size, 1, 1, 1)
         
         # Pass annealing_factor to each block (propagate to MoE layers)
-        x, r_probs = self._run_block_with_checkpoint(
-            self._block_4_fn, x, w, text_seq, kl_losses, annealing_factor)
+        x, r_probs = self._run_block_with_checkpoint(self._block_4_fn, 4, x, w, text_seq, kl_losses, annealing_factor)
         routing_probs.append(r_probs)
-
-        # Generate 8x8 image (pass annealing_factor)
-        x, r_probs = self._run_block_with_checkpoint(
-            self._block_8_fn, x, w, text_seq, kl_losses, annealing_factor)
+        x, r_probs = self._run_block_with_checkpoint(self._block_8_fn, 8, x, w, text_seq, kl_losses, annealing_factor)
         routing_probs.append(r_probs)
-
-        # Generate 16x16 image (pass annealing_factor)
-        x, r_probs = self._run_block_with_checkpoint(
-            self._block_16_fn, x, w, text_seq, kl_losses, annealing_factor)
+        x, r_probs = self._run_block_with_checkpoint(self._block_16_fn, 16, x, w, text_seq, kl_losses, annealing_factor)
         routing_probs.append(r_probs)
-
-        # Generate 32x32 image (pass annealing_factor)
-        x, r_probs = self._run_block_with_checkpoint(
-            self._block_32_fn, x, w, text_seq, kl_losses, annealing_factor)
+        x, r_probs = self._run_block_with_checkpoint(self._block_32_fn, 32, x, w, text_seq, kl_losses, annealing_factor)
         routing_probs.append(r_probs)
-        x_32 = self.to_rgb_32(x, w) # Keep 32x32 output
-
-        # Generate 64x64 image (final resolution) (pass annealing_factor)
-        x, r_probs = self._run_block_with_checkpoint(
-            self._block_64_fn, x, w, text_seq, kl_losses, annealing_factor)
+        x_32 = self.to_rgb_32(x, w)
+        x, r_probs = self._run_block_with_checkpoint(self._block_64_fn, 64, x, w, text_seq, kl_losses, annealing_factor)
         routing_probs.append(r_probs)
-        x_64 = self.to_rgb_64(x, w) # Keep 64x64 output
+        x_64 = self.to_rgb_64(x, w)
 
         # Combine outputs from different resolutions
         x_32_upsampled = F.interpolate(x_32, scale_factor=2, mode='bilinear', align_corners=False)
