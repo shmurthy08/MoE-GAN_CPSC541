@@ -269,37 +269,48 @@ class BayesianRouter(nn.Module):
         self.text_dim = text_dim
         self.num_experts = num_experts
         
-        # Feature projection
+        # Feature projection with smaller initialization
         self.feature_mu = nn.Parameter(torch.Tensor(feature_dim, 128))
-        nn.init.kaiming_normal_(self.feature_mu, mode='fan_in', nonlinearity='leaky_relu')
-        self.feature_rho = nn.Parameter(torch.Tensor(feature_dim, 128).fill_(-3))
+        # Use smaller standard deviation for initialization
+        nn.init.normal_(self.feature_mu, mean=0.0, std=0.01)
+        # Initialize rho to a value corresponding to lower initial variance
+        self.feature_rho = nn.Parameter(torch.Tensor(feature_dim, 128).fill_(-4.0))
         
-        # Text projection
-        self.text_mu = nn.Parameter(torch.Tensor(text_dim, 128).normal_(0, 0.1))
-        self.text_rho = nn.Parameter(torch.Tensor(text_dim, 128).normal_(-3, 0.1))
+        # Text projection with smaller initialization
+        self.text_mu = nn.Parameter(torch.Tensor(text_dim, 128))
+        nn.init.normal_(self.text_mu, mean=0.0, std=0.01)
+        self.text_rho = nn.Parameter(torch.Tensor(text_dim, 128).fill_(-4.0))
         
-        # Combined projection to expert logits
-        self.combined_mu = nn.Parameter(torch.Tensor(256, num_experts).normal_(0, 0.1))
-        self.combined_rho = nn.Parameter(torch.Tensor(256, num_experts).normal_(-3, 0.1))
+        # Combined projection to expert logits with smaller initialization
+        self.combined_mu = nn.Parameter(torch.Tensor(256, num_experts))
+        nn.init.normal_(self.combined_mu, mean=0.0, std=0.01)
+        self.combined_rho = nn.Parameter(torch.Tensor(256, num_experts).fill_(-4.0))
         
         # Noise for sampling
         self.register_buffer('epsilon_f', torch.zeros(feature_dim, 128))
         self.register_buffer('epsilon_t', torch.zeros(text_dim, 128))
         self.register_buffer('epsilon_c', torch.zeros(256, num_experts))
         
-        # Temperature parameter for sharpening distribution
-        self.temperature = nn.Parameter(torch.ones(1) * 1.0)
-    
+        # Temperature parameter - start with higher value for less sharp distributions
+        self.temperature = nn.Parameter(torch.ones(1) * 3.0)
     def reparameterize(self, mu, rho, epsilon=None):
-        """
-        Reparameterization trick for sampling from a Gaussian posterior.
-        """
-        sigma = torch.log(1 + torch.exp(rho))
+        """Numerically stable reparameterization"""
+        # Clamp mu and rho to prevent extreme values
+        mu = torch.clamp(mu, min=-10.0, max=10.0)
+        rho = torch.clamp(rho, min=-8.0, max=4.0)
+        
+        # More stable sigma calculation with minimum bound
+        sigma = torch.clamp(torch.log1p(torch.exp(rho)), min=1e-6, max=10.0)
+        
         if epsilon is None:
             epsilon = torch.randn_like(sigma)
+        
+        # Clamp epsilon too for more stability
+        epsilon = torch.clamp(epsilon, min=-2.0, max=2.0)
+        
         return mu + sigma * epsilon
     
-    def forward(self, feature, text_embedding, sampling=True):
+    def forward(self, feature, text_embedding, sampling=True, annealing_factor=1.0):
         batch_size = feature.size(0)
         
         # Sample weights if in training mode
@@ -309,7 +320,7 @@ class BayesianRouter(nn.Module):
             self.epsilon_t.normal_()
             self.epsilon_c.normal_()
             
-            # Sample weights
+            # Sample weights with improved reparameterization
             feature_weight = self.reparameterize(self.feature_mu, self.feature_rho, self.epsilon_f)
             text_weight = self.reparameterize(self.text_mu, self.text_rho, self.epsilon_t)
             combined_weight = self.reparameterize(self.combined_mu, self.combined_rho, self.epsilon_c)
@@ -329,11 +340,23 @@ class BayesianRouter(nn.Module):
         # Get expert logits
         logits = torch.matmul(combined, combined_weight)
         
-        # Apply temperature for sharper distribution
-        logits = logits / torch.clamp(self.temperature, min=0.1)
+        # Apply temperature with annealing for smoother training
+        # Start with higher temperature (larger annealing_factor) and reduce over time
+        effective_temp = torch.clamp(self.temperature * annealing_factor, min=0.5, max=5.0)
+        
+        # Temperature-scaled logits with safeguards
+        logits = logits / effective_temp
+        
+        # Prevent extreme logits that could cause NaN in softmax
+        logits = torch.clamp(logits, min=-20.0, max=20.0)
         
         # Get probabilities using softmax
         probs = F.softmax(logits, dim=1)
+        
+        # Prevent numerical instability from near-zero probabilities
+        probs = torch.clamp(probs, min=1e-6, max=1.0)
+        # Re-normalize to ensure sum is exactly 1.0
+        probs = probs / probs.sum(dim=1, keepdim=True)
         
         # For inference, make routing sparse by taking the top-1 expert
         if not self.training:
@@ -347,40 +370,27 @@ class BayesianRouter(nn.Module):
             probs = one_hot
         
         return probs, logits
+
     
     def kl_divergence(self):
-        """
-        Calculate KL divergence between posterior and prior distributions.
-        Fixed to handle different tensor dimensions properly.
-        """
-        kl_div = 0.0
+        """Numerically stable KL divergence"""
+        # Convert to log-variance for stability
+        log_var_f = 2 * torch.log(torch.log1p(torch.exp(self.feature_rho)))
+        log_var_t = 2 * torch.log(torch.log1p(torch.exp(self.text_rho)))
+        log_var_c = 2 * torch.log(torch.log1p(torch.exp(self.combined_rho)))
         
-        # Prior: standard normal distribution
-        prior_mean = 0.0
-        prior_var = 1.0
+        # Stable KL calculation
+        kl_f = 0.5 * torch.sum(torch.exp(log_var_f) + self.feature_mu.pow(2) - 1 - log_var_f)
+        kl_t = 0.5 * torch.sum(torch.exp(log_var_t) + self.text_mu.pow(2) - 1 - log_var_t)
+        kl_c = 0.5 * torch.sum(torch.exp(log_var_c) + self.combined_mu.pow(2) - 1 - log_var_c)
         
-        # Calculate KL for feature weights
-        posterior_var_f = torch.log(1 + torch.exp(self.feature_rho)) ** 2
-        kl_div += 0.5 * torch.sum(
-            torch.log(prior_var / posterior_var_f) +
-            (posterior_var_f + self.feature_mu ** 2) / prior_var - 1
-        )
+        # Combine and handle numerical issues
+        kl_div = kl_f + kl_t + kl_c
+        kl_div = torch.nan_to_num(kl_div, nan=0.0, posinf=200.0, neginf=0.0)
+        kl_div = torch.clamp(kl_div, min=0.0, max=120.0)
         
-        # Calculate KL for text weights
-        posterior_var_t = torch.log(1 + torch.exp(self.text_rho)) ** 2
-        kl_div += 0.5 * torch.sum(
-            torch.log(prior_var / posterior_var_t) +
-            (posterior_var_t + self.text_mu ** 2) / prior_var - 1
-        )
-        
-        # Calculate KL for combined weights
-        posterior_var_c = torch.log(1 + torch.exp(self.combined_rho)) ** 2
-        kl_div += 0.5 * torch.sum(
-            torch.log(prior_var / posterior_var_c) +
-            (posterior_var_c + self.combined_mu ** 2) / prior_var - 1
-        )
-        
-        return kl_div * 0.0001
+        # The scalar multiplier will be applied by the annealing
+        return kl_div
     
     
 class SparseMoE(nn.Module):
@@ -475,9 +485,17 @@ class AttentionBlock(nn.Module):
         self.proj_in = ModulatedConv(dim, dim, kernel_size=1)
         self.proj_out = ModulatedConv(dim, dim, kernel_size=1)
     
-    def forward(self, x, w, text_seq, kl_losses=None):
+    def forward(self, x, w, text_seq, kl_losses=None, annealing_factor=1.0):
+        """
+        Forward pass with temperature annealing support.
         
-        
+        Args:
+            x: Input tensor
+            w: Style vector
+            text_seq: Text embedding sequence
+            kl_losses: List to store KL losses
+            annealing_factor: Temperature annealing factor for Bayesian router
+        """
         batch_size, channels, height, width = x.shape
         
         # Project input
@@ -502,9 +520,11 @@ class AttentionBlock(nn.Module):
         # Back to spatial dimensions
         x_spatial = x_flat.reshape(batch_size, height, width, channels).permute(0, 3, 1, 2)
         
-        # Sparse MoE FFN
+        # Sparse MoE FFN with annealing factor
         x_norm_spatial = self.norm3(x_flat).reshape(batch_size, height, width, channels).permute(0, 3, 1, 2)
-        moe_out, moe_kl, routing_probs = self.moe(x_norm_spatial, w)
+        
+        # Pass annealing_factor to MoE layer
+        moe_out, moe_kl, routing_probs = self.moe(x_norm_spatial, w, annealing_factor)
         
         # Store KL losses if tracking
         if kl_losses is not None:
@@ -517,6 +537,7 @@ class AttentionBlock(nn.Module):
         x_out = self.proj_out(x_spatial, w)
         
         return x_out, routing_probs
+
     
 class ConvolutionBlock(nn.Module):
     """
@@ -584,7 +605,18 @@ class GenerativeBlock(nn.Module):
             out_channels, text_dim=text_dim
         )
     
-    def forward(self, x, w, text_seq, kl_losses=None):
+    def forward(self, x, w, text_seq, kl_losses=None, annealing_factor=1.0):
+        """
+        Forward pass with temperature annealing support.
+        
+        Args:
+            x: Input tensor
+            w: Style vector
+            text_seq: Text embedding sequence
+            kl_losses: List to store KL losses
+            annealing_factor: Temperature annealing factor for Bayesian router
+        """
+        # ======== MODIFY FORWARD METHOD ========
         # Upsample if needed
         if self.upsample:
             x = self.up(x)
@@ -592,8 +624,8 @@ class GenerativeBlock(nn.Module):
         # Convolution block
         x = self.conv_block(x, w)
         
-        # Attention block
-        x, routing_probs = self.attn_block(x, w, text_seq, kl_losses)
+        # Attention block with annealing factor
+        x, routing_probs = self.attn_block(x, w, text_seq, kl_losses, annealing_factor)
         
         return x, routing_probs
 
@@ -663,32 +695,50 @@ class AuroraGenerator(nn.Module):
             text_embeddings = text_or_embeddings
         return text_embeddings
     
-    def _run_block_with_checkpoint(self, block_fn, x, w, text_seq, kl_losses):
+    def _run_block_with_checkpoint(self, block_fn, x, w, text_seq, kl_losses, annealing_factor=1.0):
         """Run a generative block with optional gradient checkpointing"""
         if self._use_checkpointing and self.training:
             return torch.utils.checkpoint.checkpoint(
                 block_fn,
-                x, w, text_seq, kl_losses
+                x, w, text_seq, kl_losses, annealing_factor
             )
         else:
-            return block_fn(x, w, text_seq, kl_losses)
+            return block_fn(x, w, text_seq, kl_losses, annealing_factor)
     
-    def _block_4_fn(self, x, w, text_seq, kl_losses):
-        return self.gen_block_4(x, w, text_seq, kl_losses)
+    def _block_4_fn(self, x, w, text_seq, kl_losses, annealing_factor=1.0):
+        # Pass annealing_factor to gen_block_4
+        return self.gen_block_4(x, w, text_seq, kl_losses, annealing_factor)
     
-    def _block_8_fn(self, x, w, text_seq, kl_losses):
-        return self.gen_block_8(x, w, text_seq, kl_losses)
+    def _block_8_fn(self, x, w, text_seq, kl_losses, annealing_factor=1.0):
+        # Pass annealing_factor to gen_block_8
+        return self.gen_block_8(x, w, text_seq, kl_losses, annealing_factor)
     
-    def _block_16_fn(self, x, w, text_seq, kl_losses):
-        return self.gen_block_16(x, w, text_seq, kl_losses)
+    def _block_16_fn(self, x, w, text_seq, kl_losses, annealing_factor=1.0):
+        # Pass annealing_factor to gen_block_16
+        return self.gen_block_16(x, w, text_seq, kl_losses, annealing_factor)
     
-    def _block_32_fn(self, x, w, text_seq, kl_losses):
-        return self.gen_block_32(x, w, text_seq, kl_losses)
+    def _block_32_fn(self, x, w, text_seq, kl_losses, annealing_factor=1.0):
+        # Pass annealing_factor to gen_block_32
+        return self.gen_block_32(x, w, text_seq, kl_losses, annealing_factor)
     
-    def _block_64_fn(self, x, w, text_seq, kl_losses):
-        return self.gen_block_64(x, w, text_seq, kl_losses)
-
-    def forward(self, z, text_input, truncation_psi=0.7, return_routing=False, return_intermediate=False):
+    def _block_64_fn(self, x, w, text_seq, kl_losses, annealing_factor=1.0):
+        # Pass annealing_factor to gen_block_64
+        return self.gen_block_64(x, w, text_seq, kl_losses, annealing_factor)
+    
+    def forward(self, z, text_input, truncation_psi=0.7, return_routing=False, 
+                return_intermediate=False, annealing_factor=1.0):
+        """
+        Forward pass with temperature annealing support for MoE layers.
+        
+        Args:
+            z: Input noise vector
+            text_input: Text embeddings or text prompt
+            truncation_psi: Truncation trick factor
+            return_routing: Whether to return routing probabilities
+            return_intermediate: Whether to return intermediate outputs
+            annealing_factor: Temperature annealing factor for Bayesian routers
+        """
+        # ======== MODIFY FORWARD METHOD ========
         batch_size = z.size(0)
 
         text_embeddings = self.encode_text(text_input)
@@ -720,24 +770,31 @@ class AuroraGenerator(nn.Module):
 
         # Generate 4x4 image
         x = self.constant.repeat(batch_size, 1, 1, 1)
-        x, r_probs = self._run_block_with_checkpoint(self._block_4_fn, x, w, text_seq, kl_losses)
+        
+        # Pass annealing_factor to each block (propagate to MoE layers)
+        x, r_probs = self._run_block_with_checkpoint(
+            self._block_4_fn, x, w, text_seq, kl_losses, annealing_factor)
         routing_probs.append(r_probs)
 
-        # Generate 8x8 image
-        x, r_probs = self._run_block_with_checkpoint(self._block_8_fn, x, w, text_seq, kl_losses)
+        # Generate 8x8 image (pass annealing_factor)
+        x, r_probs = self._run_block_with_checkpoint(
+            self._block_8_fn, x, w, text_seq, kl_losses, annealing_factor)
         routing_probs.append(r_probs)
 
-        # Generate 16x16 image
-        x, r_probs = self._run_block_with_checkpoint(self._block_16_fn, x, w, text_seq, kl_losses)
+        # Generate 16x16 image (pass annealing_factor)
+        x, r_probs = self._run_block_with_checkpoint(
+            self._block_16_fn, x, w, text_seq, kl_losses, annealing_factor)
         routing_probs.append(r_probs)
 
-        # Generate 32x32 image
-        x, r_probs = self._run_block_with_checkpoint(self._block_32_fn, x, w, text_seq, kl_losses)
+        # Generate 32x32 image (pass annealing_factor)
+        x, r_probs = self._run_block_with_checkpoint(
+            self._block_32_fn, x, w, text_seq, kl_losses, annealing_factor)
         routing_probs.append(r_probs)
         x_32 = self.to_rgb_32(x, w) # Keep 32x32 output
 
-        # Generate 64x64 image (final resolution)
-        x, r_probs = self._run_block_with_checkpoint(self._block_64_fn, x, w, text_seq, kl_losses)
+        # Generate 64x64 image (final resolution) (pass annealing_factor)
+        x, r_probs = self._run_block_with_checkpoint(
+            self._block_64_fn, x, w, text_seq, kl_losses, annealing_factor)
         routing_probs.append(r_probs)
         x_64 = self.to_rgb_64(x, w) # Keep 64x64 output
 
@@ -756,6 +813,7 @@ class AuroraGenerator(nn.Module):
             return final_image, x_32, kl_loss
         else:
             return final_image, kl_loss
+
 
 
 class AuroraDiscriminator(nn.Module):
@@ -871,33 +929,51 @@ class AuroraGANLoss:
         Assumes routing_probs is a list, takes the last one (final layer).
         """
         if not routing_probs:
-             return torch.tensor(0.0, device=self.device)
-
-        # Use probabilities from the last MoE layer
-        last_probs = routing_probs[-1] # Shape [batch*h*w, num_experts]
-
+            return torch.tensor(0.0, device=self.device)
+            
+        # Use probabilities from the last MoE layer (final layer)
+        last_probs = routing_probs[-1]
+        
         if last_probs is None or last_probs.numel() == 0:
-             return torch.tensor(0.0, device=self.device)
-
+            return torch.tensor(0.0, device=self.device)
+            
+        # Add small constant to prevent division by zero
+        eps = 1e-6
+        
         num_experts = last_probs.size(1)
-        batch_items = last_probs.size(0) # Total number of items routed
-
-        # Sum probabilities per expert across all items routed
-        load = last_probs.sum(dim=0) # Shape [num_experts]
-
-        # Compute fraction of items routed to each expert (P_i in paper)
-        fraction_routed = load / batch_items
-
-        # Compute average probability per expert across items (f_i in paper)
-        # Need sum of squares of probabilities per expert, then sum over items
-        sum_probs_per_item = last_probs.sum(dim=1) # Should ideally be 1 if hard routing, may vary slightly
-        avg_prob_per_expert = (last_probs / (sum_probs_per_item.unsqueeze(1) + 1e-10)).sum(dim=0) / batch_items
-
-        # Balance loss = N * sum(fraction_routed * avg_prob_per_expert)
-        # Paper uses alpha * N * sum(f_i * P_i), where alpha is the balance_weight
-        balance_loss = num_experts * torch.sum(fraction_routed * avg_prob_per_expert)
-
+        batch_items = last_probs.size(0)
+        
+        # Sum probabilities per expert across the batch
+        # This represents how much each expert is used
+        load = last_probs.sum(dim=0) + eps  # Shape: [num_experts]
+        
+        # Compute normalized expert usage (fraction of total routing)
+        fraction_routed = load / batch_items  # Shape: [num_experts]
+        
+        # Compute per-item mean activation
+        # First normalize the routing probs per item (should sum to 1 already, but ensure)
+        prob_normalize = last_probs / (last_probs.sum(dim=1, keepdim=True) + eps)
+        
+        # Now compute mean probability per expert
+        expert_prob_mean = prob_normalize.mean(dim=0)  # Shape: [num_experts]
+        
+        # Compute coefficient of variation (CV) - standard deviation / mean
+        # This measures how uneven the expert utilization is
+        mean_usage = torch.mean(fraction_routed)
+        std_usage = torch.std(fraction_routed)
+        cv = std_usage / (mean_usage + eps)
+        
+        # Scale CV by number of experts for normalized balance loss
+        balance_loss = num_experts * cv
+        
+        # Apply safety clamping to prevent extreme values
+        balance_loss = torch.clamp(balance_loss, min=0.0, max=10.0)
+        
+        # Handle NaN values (replace with 0.0)
+        balance_loss = torch.nan_to_num(balance_loss, nan=0.0)
+        
         return balance_weight * balance_loss
+
 
 from tqdm import tqdm
 
@@ -908,6 +984,7 @@ def train_aurora_gan(
     clip_weight_64=0.1,
     clip_weight_32=0.05,
     kl_weight=0.001,
+    kl_annealing_epochs=3,
     balance_weight = 0.01,
     device=DEVICE, save_dir='./aurora_checkpoints',
     log_interval=10, save_interval=1000,
@@ -925,8 +1002,8 @@ def train_aurora_gan(
         val_dataloader: Optional validation data loader
         num_epochs: Number of training epochs
         lr: Learning rate
-        beta1: Beta1 for Adam optimizer
-        beta2: Beta2 for Adam optimizer
+        beta1: Beta1 for AdamW optimizer
+        beta2: Beta2 for AdamW optimizer
         r1_gamma: R1 regularization weight
         clip_weight_64: CLIP loss weight for 64x64 resolution
         clip_weight_32: CLIP loss weight for 32x32 resolution
@@ -958,8 +1035,9 @@ def train_aurora_gan(
         generator.enable_checkpointing()
     
     # Initialize optimizers
-    optimizer_g = torch.optim.Adam(generator.parameters(), lr=lr, betas=(beta1, beta2))
-    optimizer_d = torch.optim.Adam(discriminator.parameters(), lr=lr, betas=(beta1, beta2))
+    weight_decay = 0.01
+    optimizer_g = torch.optim.AdamW(generator.parameters(), lr=lr, betas=(beta1, beta2), weight_decay=weight_decay)
+    optimizer_d = torch.optim.AdamW(discriminator.parameters(), lr=lr, betas=(beta1, beta2), weight_decay=weight_decay)
 
     # Initialize AMP scaler for mixed precision training
     scaler = torch.cuda.amp.GradScaler() if use_amp and torch.cuda.is_available() else None
@@ -971,6 +1049,20 @@ def train_aurora_gan(
     step = 0
     for epoch in range(num_epochs):
         print(f"Starting epoch {epoch+1}/{num_epochs}")
+        
+        # Calculate annealing factors for temperature and KL weight
+        # Start with high temperature (more uniform routing) and low KL weight
+        temperature_factor = max(1.0, 3.0 - epoch * 0.2)  # Starts at 3.0, reduces by 0.2 each epoch 
+        
+        # Very slow KL warmup to avoid instability
+        # The first 5 epochs have very small KL weight to establish stable directions
+        kl_warmup_factor = min(1.0, epoch / kl_annealing_epochs)  # Gradual increase over 20 epochs
+        effective_kl_weight = kl_weight * kl_warmup_factor
+        
+        print(f"Epoch {epoch+1} settings:")
+        print(f"  Temperature factor: {temperature_factor:.2f}")
+        print(f"  KL warmup factor: {kl_warmup_factor:.3f}")
+        print(f"  Effective KL weight: {effective_kl_weight:.8f}")
 
         epoch_pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{num_epochs}")
         
@@ -1055,10 +1147,12 @@ def train_aurora_gan(
             # Only step optimizer after accumulating gradients
             if (batch_idx + 1) % gradient_accumulation_steps == 0 or (batch_idx + 1) == len(dataloader):
                 if scaler:
+                    # Clip before scaler step
+                    scaler.unscale_(optimizer_d)
                     torch.nn.utils.clip_grad_norm_(discriminator.parameters(), max_norm=1.0)
                     scaler.step(optimizer_d)
                 else:
-                    torch.nn.utils.clip_grad_norm_(generator.parameters(), max_norm=1.0)
+                    torch.nn.utils.clip_grad_norm_(discriminator.parameters(), max_norm=1.0)
                     optimizer_d.step()
                 
                 if scaler:
@@ -1072,13 +1166,22 @@ def train_aurora_gan(
 
             with torch.cuda.amp.autocast() if use_amp else nullcontext():
                 # Generate fake images, get intermediate, KL loss, and routing probs
-                fake_images_64, fake_images_32, kl_loss, routing_probs = generator(z, text_embeddings, return_intermediate=True, return_routing=True)
+                fake_images_64, fake_images_32, kl_loss, routing_probs = generator(z, text_embeddings, return_intermediate=True, return_routing=True, annealing_factor=temperature_factor)
 
+                # Apply safe handling to KL loss
+                if kl_loss is not None:
+                    # Detect and prevent extreme KL values
+                    if torch.isnan(kl_loss) or torch.isinf(kl_loss):
+                        print(f"⚠️ NaN/Inf detected in KL loss! Replacing with zero.")
+                        kl_loss = torch.tensor(0.0, device=device)
+                    elif kl_loss > 100.0:
+                        print(f"⚠️ Extremely high KL detected: {kl_loss.item():.2f}, clamping to 100.0")
+                        kl_loss = torch.tensor(100.0, device=device)
                 # Discriminator prediction on fake images (use final resolution)
                 fake_pred_g = discriminator(fake_images_64, text_embeddings) # Use G's output directly
 
                 # --- Generator Adversarial Loss ---
-                g_loss_gan = gan_loss.generator_loss(fake_pred_g, kl_loss, kl_weight=kl_weight)
+                g_loss_gan = gan_loss.generator_loss(fake_pred_g)
 
                 # --- Multi-level CLIP Loss ---
                 clip_loss_64 = gan_loss.compute_clip_loss(fake_images_64, text_embeddings)
@@ -1089,7 +1192,7 @@ def train_aurora_gan(
                 balance_loss = gan_loss.moe_balance_loss(routing_probs, balance_weight=balance_weight)
 
                 # --- Total Generator Loss ---
-                g_loss = g_loss_gan + g_loss_clip + balance_loss
+                g_loss = g_loss_gan + g_loss_clip + balance_loss + (effective_kl_weight * kl_loss) if kl_loss is not None else g_loss_gan + g_loss_clip + balance_loss
             
             # Scale the loss if using AMP
             if scaler:
@@ -1100,6 +1203,8 @@ def train_aurora_gan(
             # Only step optimizer after accumulating gradients
             if (batch_idx + 1) % gradient_accumulation_steps == 0 or (batch_idx + 1) == len(dataloader):
                 if scaler:
+                    # Clip before scaler step
+                    scaler.unscale_(optimizer_g)
                     torch.nn.utils.clip_grad_norm_(generator.parameters(), max_norm=1.0)
                     scaler.step(optimizer_g)
                 else:
@@ -1136,19 +1241,19 @@ def train_aurora_gan(
                       f"G_loss: {g_loss.item():.4f} (GAN: {g_loss_gan.item():.4f}, Clip64: {clip_loss_64.item():.4f}, Clip32: {clip_loss_32.item():.4f}, KL: {kl_loss.item():.4f}, Balance: {balance_loss.item():.4f})")
 
             # Save models
-            if step % save_interval == 0 and step > 0: # Avoid saving at step 0
-                # Clean GPU memory before saving to avoid OOM
-                torch.cuda.empty_cache()
+            # if step % save_interval == 0 and step > 0: # Avoid saving at step 0
+            #     # Clean GPU memory before saving to avoid OOM
+            #     torch.cuda.empty_cache()
                 
-                checkpoint_path = os.path.join(save_dir, f"aurora_checkpoint_{step}.pt")
-                torch.save({
-                    'generator': generator.state_dict(),
-                    'discriminator': discriminator.state_dict(),
-                    'optimizer_g': optimizer_g.state_dict(),
-                    'optimizer_d': optimizer_d.state_dict(),
-                    'epoch': epoch,
-                    'step': step
-                }, checkpoint_path)
+            #     checkpoint_path = os.path.join(save_dir, f"aurora_checkpoint_{step}.pt")
+            #     torch.save({
+            #         'generator': generator.state_dict(),
+            #         'discriminator': discriminator.state_dict(),
+            #         'optimizer_g': optimizer_g.state_dict(),
+            #         'optimizer_d': optimizer_d.state_dict(),
+            #         'epoch': epoch,
+            #         'step': step
+            #     }, checkpoint_path)
                 
             step += 1
 
@@ -1247,19 +1352,19 @@ def train_aurora_gan(
 
         # Save model after each epoch
         # Clean GPU memory first
-        torch.cuda.empty_cache()
+        # torch.cuda.empty_cache()
         
-        epoch_save_path = os.path.join(save_dir, f"aurora_checkpoint_epoch_{epoch+1}.pt")
-        torch.save({
-            'generator': generator.state_dict(),
-            'discriminator': discriminator.state_dict(),
-            'optimizer_g': optimizer_g.state_dict(),
-            'optimizer_d': optimizer_d.state_dict(),
-            'epoch': epoch + 1,
-            'step': step
-        }, epoch_save_path)
+        # epoch_save_path = os.path.join(save_dir, f"aurora_checkpoint_epoch_{epoch+1}.pt")
+        # torch.save({
+        #     'generator': generator.state_dict(),
+        #     'discriminator': discriminator.state_dict(),
+        #     'optimizer_g': optimizer_g.state_dict(),
+        #     'optimizer_d': optimizer_d.state_dict(),
+        #     'epoch': epoch + 1,
+        #     'step': step
+        # }, epoch_save_path)
         
-        print(f"Checkpoint saved to {epoch_save_path}")
+        # print(f"Checkpoint saved to {epoch_save_path}")
 
     # Save final models
     # Clean GPU memory first

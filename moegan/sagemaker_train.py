@@ -273,25 +273,27 @@ def main():
             clip_weight_64=params.get('clip_weight_64', 0.1),
             clip_weight_32=params.get('clip_weight_32', 0.05),
             kl_weight=params.get('kl_weight', 0.001),
+            kl_annealing_epochs=params.get('kl_annealing_epochs', 1),
             balance_weight=params.get('balance_weight', 0.01),
             device=device,
             save_dir=save_dir,
-            log_interval=50,
+            log_interval=100,
             save_interval=500,
             metric_callback=metric_callback,
-            gradient_accumulation_steps=8,
+            gradient_accumulation_steps=9,
             checkpoint_activation=True,
             batch_memory_limit=10.0
         )
         
         # Save final model 
-        final_model_path = os.path.join(MODEL_PATH, 'aurora_model_final.pt')
-        torch.save({
-            'generator': generator.state_dict(),
-            'discriminator': discriminator.state_dict(),
-        }, final_model_path)
+        ### UNCOMMENT WHEN TRAINING FINAL MODEL ###
+        # final_model_path = os.path.join(MODEL_PATH, 'aurora_model_final.pt')
+        # torch.save({
+        #     'generator': generator.state_dict(),
+        #     'discriminator': discriminator.state_dict(),
+        # }, final_model_path)
         
-        print("Training complete. Final model saved to {}".format(final_model_path))
+        print("Training complete")
     
     except Exception as e:
         print("\n" + "="*50)
