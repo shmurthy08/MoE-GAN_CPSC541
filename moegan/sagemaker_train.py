@@ -285,10 +285,9 @@ def main():
         #     batch_memory_limit=10.0
         # )
         progressive_schedule = [
-            ([4, 8], 0.25),            # First 25% of epochs: train 4x4 and 8x8 only
-            ([4, 8, 16], 0.25),        # Next 25%: add 16x16
-            ([4, 8, 16, 32], 0.25),    # Next 25%: add 32x32
-            ([4, 8, 16, 32, 64], 0.25) # Final 25%: full 64x64 model
+            ([4, 8], 0.33),            # First 2 epochs: train 4x4 and 8x8 only
+            ([4, 8, 16, 32], 0.33),    # Next 2 epochs: add 16x16 and 32x32
+            ([4, 8, 16, 32, 64], 0.34) # Final 2 epochs: full 64x64 model
         ]
         generator, discriminator = progressive_train_aurora_gan(
             train_dataloader, 

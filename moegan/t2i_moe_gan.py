@@ -1543,23 +1543,97 @@ def progressive_train_aurora_gan(
         # Set active resolutions for this phase
         generator.set_active_resolutions(active_resolutions)
         
+        # Reset optimizer state for newly activated blocks
+        if phase_idx > 0:  # Skip for first phase
+            # Get the highest resolution from previous phase
+            prev_phase_max_res = max(progressive_schedule[phase_idx-1][0])
+            # Get newly activated resolutions
+            new_resolutions = [res for res in active_resolutions if res > prev_phase_max_res]
+            
+            if new_resolutions:
+                print(f"Resetting optimizer state for newly activated blocks: {new_resolutions}")
+                
+                # Identify parameters from newly activated blocks
+                new_params = []
+                for res in new_resolutions:
+                    if res == 16:
+                        new_params.extend(list(generator.gen_block_16.parameters()))
+                    elif res == 32:
+                        new_params.extend(list(generator.gen_block_32.parameters()))
+                        new_params.extend(list(generator.to_rgb_32.parameters()))
+                    elif res == 64:
+                        new_params.extend(list(generator.gen_block_64.parameters()))
+                        new_params.extend(list(generator.to_rgb_64.parameters()))
+                
+                # Reset Adam state for these parameters
+                for param in new_params:
+                    param_id = id(param)
+                    if param_id in optimizer_g.state:
+                        # Reset momentum and variance estimates
+                        optimizer_g.state[param_id]['exp_avg'] = torch.zeros_like(param.data)
+                        optimizer_g.state[param_id]['exp_avg_sq'] = torch.zeros_like(param.data)
+                
+                # Consider using a lower learning rate for new params
+                # This requires modifying the optimizer's param groups
+                param_group = {'params': new_params, 'lr': lr * 0.5}  # Half learning rate for new blocks
+                optimizer_g.add_param_group(param_group)
+                print(f"Added {len(new_params)} parameters to optimizer with reduced learning rate")
+
+        
         # Train for this phase
         for epoch in range(phase_start_epoch, phase_end_epoch):
             print(f"Starting epoch {epoch+1}/{num_epochs}")
             
-            # KL annealing based on current phase, not global epoch
+            # Calculate annealing factors specific to phase
             phase_epoch = epoch - phase_start_epoch
             phase_epochs_total = phase_end_epoch - phase_start_epoch
+            global_progress = epoch / num_epochs  # Overall training progress
             
             # Calculate annealing factors specific to phase
             temperature_factor = max(1.0, 3.0 - phase_epoch * (2.0 / max(1, phase_epochs_total))) 
-            kl_warmup_factor = min(1.0, phase_epoch / min(kl_annealing_epochs, phase_epochs_total))
+            # Cosine KL annealing with phase awareness
+            if phase_idx == 0:  
+                # First phase - standard linear warmup
+                kl_warmup_factor = min(1.0, phase_epoch / min(kl_annealing_epochs, phase_epochs_total))
+            else:
+                # Later phases - start from 30% and use cosine schedule
+                min_kl_value = 0.3  # Never drop below 30% after first phase
+                phase_progress = phase_epoch / phase_epochs_total
+                
+                # Cosine schedule: smooth transition that starts higher and ends at full strength
+                kl_warmup_factor = min_kl_value + (1.0 - min_kl_value) * (
+                    0.5 * (1 + math.cos(math.pi * (1 - phase_progress)))
+                )
+                
+                # Additional damping for early epochs of a new phase
+                if phase_epoch < 3:  # First few epochs of a new phase
+                    damping = phase_epoch / 3  # Gradual increase over first 3 epochs
+                    kl_warmup_factor = min_kl_value + (kl_warmup_factor - min_kl_value) * damping
+
             effective_kl_weight = kl_weight * kl_warmup_factor
+
+            # Add debug logging
+            print(f"  Global progress: {global_progress:.2f}, Phase progress: {phase_epoch}/{phase_epochs_total}")
+            print(f"  KL warmup factor: {kl_warmup_factor:.3f}")
             
             print(f"  Phase {phase_idx+1} Epoch {phase_epoch+1}/{phase_epochs_total}")
             print(f"  Temperature factor: {temperature_factor:.2f}")
-            print(f"  KL warmup factor: {kl_warmup_factor:.3f}")
             print(f"  Effective KL weight: {effective_kl_weight:.8f}")
+            
+            # Adjust learning rates during the early epochs of a new phase
+            if phase_idx > 0 and phase_epoch < 5:  # First 5 epochs of phases after the first
+                warmup_factor = (phase_epoch + 1) / 5  # Gradual increase from 20% to 100%
+                
+                # Find param groups for newly added blocks
+                if len(optimizer_g.param_groups) > 1:  # If we added param groups above
+                    for group_idx in range(1, len(optimizer_g.param_groups)):
+                        # Gradually increase from 50% to 100% of base learning rate
+                        target_lr = lr * (0.5 + 0.5 * warmup_factor)
+                        current_lr = optimizer_g.param_groups[group_idx]['lr']
+                        optimizer_g.param_groups[group_idx]['lr'] = current_lr * 0.9 + target_lr * 0.1
+                        
+                        print(f"  Warming up LR for new blocks: {optimizer_g.param_groups[group_idx]['lr']:.6f}")
+            
             
             # ==== TRAINING EPOCH LOOP - From original train_aurora_gan ====
             epoch_pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{num_epochs}")
