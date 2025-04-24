@@ -39,11 +39,16 @@
         "min_value": 0.001,
         "max_value": 0.1,
         "scaling_type": "Logarithmic"
+      },
+      "kl_annealing_epochs": {
+        "min_value": 1.0,
+        "max_value": 4.0,
+        "scaling_type": "Integer"
       }
     },
     "static_hyperparameters": {
-      "epochs": "5",
-      "batch_size": "10"
+      "epochs": "6",
+      "batch_size": "11"
     },
     "objective_metric": {
       "name": "val_clip_loss",
