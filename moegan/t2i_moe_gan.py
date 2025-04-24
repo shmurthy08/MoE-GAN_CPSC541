@@ -411,15 +411,22 @@ class SparseMoE(nn.Module):
         # Create Bayesian router
         self.router = BayesianRouter(dim, text_dim, num_experts)
     
-    def forward(self, x, w):
-            
+    def forward(self, x, w, annealing_factor=1.0):
+        """
+        Forward pass with temperature annealing support.
+        
+        Args:
+            x: Input features
+            w: Style vector/text conditioning
+            annealing_factor: Temperature annealing factor for Bayesian router
+        """
         batch_size, channels, height, width = x.shape
         
         x_reshaped = x.permute(0, 2, 3, 1).contiguous().view(-1, channels)
         w_reshaped = w.unsqueeze(1).unsqueeze(1).expand(batch_size, height, width, -1).contiguous().view(-1, w.size(1))
         
-        # Get routing probabilities
-        routing_probs, routing_logits = self.router(x_reshaped, w_reshaped)
+        # Get routing probabilities with annealing factor
+        routing_probs, routing_logits = self.router(x_reshaped, w_reshaped, sampling=self.training, annealing_factor=annealing_factor)
         
         # Initialize output with zeros
         combined_output = torch.zeros_like(x_reshaped)

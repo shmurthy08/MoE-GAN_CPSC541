@@ -90,7 +90,7 @@ def parse_sagemaker_parameters():
     params = {}
     for key, value in hyperparameters.items():
         # Convert numerical parameters to the right type
-        if key in ['batch_size', 'epochs']:
+        if key in ['batch_size', 'epochs', 'kl_annealing_epochs']:
             params[key] = int(value)
         elif key in ['learning_rate', 'beta1', 'beta2', 'r1_gamma', 
                     'clip_weight_64', 'clip_weight_32', 'kl_weight', 'balance_weight']:
