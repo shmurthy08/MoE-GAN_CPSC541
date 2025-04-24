@@ -181,7 +181,8 @@ def main():
             'MaxParallelTrainingJobs': args.max_parallel_jobs
         },
         'ParameterRanges': {
-            'ContinuousParameterRanges': []
+            'ContinuousParameterRanges': [],
+            'IntegerParameterRanges': []
         },
         'TrainingJobEarlyStoppingType': 'Auto'
     }    
@@ -189,6 +190,14 @@ def main():
     # Add hyperparameter ranges
     for param_name, param_config in hp_config['hyperparameter_ranges'].items():
         tuning_job_config['ParameterRanges']['ContinuousParameterRanges'].append({
+            'Name': param_name,
+            'MinValue': str(param_config['min_value']),
+            'MaxValue': str(param_config['max_value']),
+            'ScalingType': param_config['scaling_type']
+        })
+    # Add integer hyperparameter ranges if any
+    for param_name, param_config in hp_config['integer_parameter_ranges'].items():
+        tuning_job_config['ParameterRanges']['IntegerParameterRanges'].append({
             'Name': param_name,
             'MinValue': str(param_config['min_value']),
             'MaxValue': str(param_config['max_value']),

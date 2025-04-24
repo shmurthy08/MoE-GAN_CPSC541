@@ -39,11 +39,13 @@
         "min_value": 0.001,
         "max_value": 0.1,
         "scaling_type": "Logarithmic"
-      },
+      }
+    },
+    "integer_parameter_ranges": {
       "kl_annealing_epochs": {
         "min_value": 1.0,
         "max_value": 4.0,
-        "scaling_type": "Integer"
+        "scaling_type": "Auto"
       }
     },
     "static_hyperparameters": {
