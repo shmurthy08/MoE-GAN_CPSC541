@@ -1199,7 +1199,7 @@ def train_aurora_gan(
                 balance_loss = gan_loss.moe_balance_loss(routing_probs, balance_weight=balance_weight)
 
                 # --- Total Generator Loss ---
-                g_loss = g_loss_gan + g_loss_clip + balance_loss + (effective_kl_weight * kl_loss) if kl_loss is not None else g_loss_gan + g_loss_clip + balance_loss
+                g_loss = (g_loss_gan + g_loss_clip + balance_loss + (effective_kl_weight * kl_loss)) if kl_loss is not None else (g_loss_gan + g_loss_clip + balance_loss)
             
             # Scale the loss if using AMP
             if scaler:
