@@ -1129,7 +1129,6 @@ def train_aurora_gan(
 
     # Training loop
     step = 0
-    current_phase_idx = -1
     for epoch in range(num_epochs):
         print(f"\n{'='*20} Epoch {epoch+1}/{num_epochs} {'='*20}")
         
@@ -1553,7 +1552,11 @@ def progressive_train_aurora_gan(
     )
     optimizer_d = torch.optim.AdamW(discriminator.parameters(), lr=lr, betas=(beta1, beta2), weight_decay=weight_decay)
     
-    # Create schedulers for both optimizers
+  
+    # Initialize AMP scaler for mixed precision training
+    scaler = torch.cuda.amp.GradScaler() if use_amp and torch.cuda.is_available() else None
+    
+      # Create schedulers for both optimizers
     lr_scheduler_g = CosineAnnealingLR(
         optimizer_g,
         T_max=num_epochs - kl_annealing_epochs,  # Exclude warmup epochs
@@ -1564,9 +1567,7 @@ def progressive_train_aurora_gan(
         T_max=num_epochs - kl_annealing_epochs,
         eta_min=lr * 0.05
     )
-
-    # Initialize AMP scaler for mixed precision training
-    scaler = torch.cuda.amp.GradScaler() if use_amp and torch.cuda.is_available() else None
+    
     
     # Initialize loss function
     gan_loss = AuroraGANLoss(device)
@@ -1633,7 +1634,9 @@ def progressive_train_aurora_gan(
         # Set active resolutions for this phase
         generator.set_active_resolutions(active_resolutions)
         
-        
+        torch.cuda.empty_cache()
+        gc.collect()
+        print(f"Memory cleared at start of phase {phase_idx+1}")
         # Reset optimizer state for newly activated blocks
         if phase_idx > 0:  # Skip for first phase
             # Get the highest resolution from previous phase
@@ -1723,10 +1726,9 @@ def progressive_train_aurora_gan(
                     
             
             # ==== TRAINING EPOCH LOOP - From original train_aurora_gan ====
-            epoch_pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{num_epochs}")
             
-            torch.cuda.empty_cache()  # Clear GPU memory before starting the epoch
-            gc.collect()  # Collect garbage to free up memory
+            
+            epoch_pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{num_epochs}")
             
             running_d_loss = 0.0
             running_g_loss = 0.0
@@ -2021,14 +2023,7 @@ def progressive_train_aurora_gan(
                         })
 
                 val_pbar.close()
-                if epoch >= kl_annealing_epochs:
-                    lr_scheduler_g.step()
-                    lr_scheduler_d.step()
-                    
-                    # Log current learning rates
-                    current_lr_g = lr_scheduler_g.get_last_lr()[0]
-                    current_lr_d = lr_scheduler_d.get_last_lr()[0]
-                    print(f"  Current learning rates - G: {current_lr_g:.8f}, D: {current_lr_d:.8f}")
+                
                 # Average losses
                 if val_samples > 0:
                     val_d_loss_gan /= val_samples
@@ -2057,6 +2052,14 @@ def progressive_train_aurora_gan(
 
                 generator.train()
                 discriminator.train()
+                if epoch >= kl_annealing_epochs:
+                    lr_scheduler_g.step()
+                    lr_scheduler_d.step()
+                    
+                    # Log current learning rates
+                    current_lr_g = lr_scheduler_g.get_last_lr()[0]
+                    current_lr_d = lr_scheduler_d.get_last_lr()[0]
+                    print(f"  Current learning rates - G: {current_lr_g:.8f}, D: {current_lr_d:.8f}")
 
             # Save model after each epoch
             # epoch_save_path = os.path.join(save_dir, f"aurora_checkpoint_epoch_{epoch+1}.pt")
