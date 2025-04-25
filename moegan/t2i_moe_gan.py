@@ -1252,9 +1252,9 @@ def train_aurora_gan(
                     if torch.isnan(kl_loss) or torch.isinf(kl_loss):
                         print(f"⚠️ NaN/Inf detected in KL loss! Replacing with zero.")
                         kl_loss = torch.tensor(0.0, device=device)
-                    elif kl_loss > 100.0:
-                        print(f"⚠️ Extremely high KL detected: {kl_loss.item():.2f}, clamping to 100.0")
-                        kl_loss = torch.tensor(100.0, device=device)
+                    elif kl_loss > 50.0:
+                        print(f"⚠️ Extremely high KL detected: {kl_loss.item():.2f}, clamping to 50.0")
+                        kl_loss = torch.tensor(50.0, device=device)
                 # Discriminator prediction on fake images (use final resolution)
                 fake_pred_g = discriminator(fake_images_64, text_embeddings) # Use G's output directly
 
@@ -1525,7 +1525,23 @@ def progressive_train_aurora_gan(
     
     # Initialize optimizers
     weight_decay = 0.01
-    optimizer_g = torch.optim.AdamW(generator.parameters(), lr=lr, betas=(beta1, beta2), weight_decay=weight_decay)
+    # Build optimizer only on phase-1 blocks ([4,8])
+    first_res = progressive_schedule[0][0]  # e.g. [4,8]
+    initial_params = []
+    # always train mapping & text projector from the start
+    initial_params += list(generator.text_projection.parameters())
+    initial_params += list(generator.mapping.parameters())
+    initial_params.append(generator.constant)
+    # add only the 4×4 and 8×8 blocks
+    if 4 in first_res:
+        initial_params += list(generator.gen_block_4.parameters())
+    if 8 in first_res:
+        initial_params += list(generator.gen_block_8.parameters())
+
+    optimizer_g = torch.optim.AdamW(
+        initial_params,
+        lr=lr, betas=(beta1, beta2), weight_decay=weight_decay
+    )
     optimizer_d = torch.optim.AdamW(discriminator.parameters(), lr=lr, betas=(beta1, beta2), weight_decay=weight_decay)
 
     # Initialize AMP scaler for mixed precision training
@@ -1593,8 +1609,7 @@ def progressive_train_aurora_gan(
         # Set active resolutions for this phase
         generator.set_active_resolutions(active_resolutions)
         
-        original_lrs = []  # Store original learning rates for later restoration
-        original_lr_d = 0.0  # Store original D learning rate for later restoration
+        
         # Reset optimizer state for newly activated blocks
         if phase_idx > 0:  # Skip for first phase
             # Get the highest resolution from previous phase
@@ -1617,28 +1632,19 @@ def progressive_train_aurora_gan(
                         new_params.extend(list(generator.gen_block_64.parameters()))
                         new_params.extend(list(generator.to_rgb_64.parameters()))
                 
-                # Reset Adam state for these parameters
-                for param in new_params:
-                    # Use parameter directly as the key (PyTorch standard)
-                    if param in optimizer_g.state:
-                        # Reset momentum and variance estimates
-                        optimizer_g.state[param]['exp_avg'] = torch.zeros_like(param.data)
-                        optimizer_g.state[param]['exp_avg_sq'] = torch.zeros_like(param.data)
-                
-                # Consider using a lower learning rate for new params
-                # This requires modifying the optimizer's param groups
-                param_group = {'params': new_params, 'lr': lr * 0.5}  # Half learning rate for new blocks
-                optimizer_g.add_param_group(param_group)
-                print(f"Added {len(new_params)} parameters to optimizer with reduced learning rate")
-                print(f"Phase transition: Temporarily reducing learning rates.")
-                for i, param_group in enumerate(optimizer_g.param_groups):
-                    original_lrs.append(param_group['lr'])
-                    # Reduce LR significantly, e.g., by 5x or 10x
-                    param_group['lr'] = param_group['lr'] / 5.0
-                    print(f"  Group {i} LR reduced to: {param_group['lr']:.6f}")
-                # Apply to discriminator too if needed
-                original_lr_d = optimizer_d.param_groups[0]['lr']
-                optimizer_d.param_groups[0]['lr'] = original_lr_d / 5.0
+                # Filter out parameters already in optimizer to avoid duplication
+                existing = {p for g in optimizer_g.param_groups for p in g['params']}
+                truly_new = [p for p in new_params if p not in existing]
+
+                if truly_new:
+                    print(f"Adding {len(truly_new)} new params for resolutions {new_resolutions} to optimizer")
+                    # Add new parameters to optimizer with a different learning rate
+                    optimizer_g.add_param_group({
+                        'params': truly_new,
+                        'lr': lr * 0.5   # warm-up LR for new blocks
+                    })
+                else:
+                    print("No new params to add at this phase")
 
         
         # Train for this phase
@@ -1916,12 +1922,6 @@ def progressive_train_aurora_gan(
 
             # Close the progress bar for this epoch
             epoch_pbar.close()
-            if phase_idx > 0 and epoch == phase_start_epoch: # If first epoch of a new phase (after phase 0)
-                print(f"Restoring learning rates after initial adaptation.")
-                for i, param_group in enumerate(optimizer_g.param_groups):
-                    param_group['lr'] = original_lrs[i] # Restore from saved values
-                    print(f"  Group {i} LR restored to: {param_group['lr']:.6f}")
-                optimizer_d.param_groups[0]['lr'] = original_lr_d
 
             # ===== VALIDATION SECTION - From original train_aurora_gan =====
             if val_dataloader is not None:
