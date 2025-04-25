@@ -1252,9 +1252,9 @@ def train_aurora_gan(
                     if torch.isnan(kl_loss) or torch.isinf(kl_loss):
                         print(f"⚠️ NaN/Inf detected in KL loss! Replacing with zero.")
                         kl_loss = torch.tensor(0.0, device=device)
-                    elif kl_loss > 100.0:
-                        print(f"⚠️ Extremely high KL detected: {kl_loss.item():.2f}, clamping to 100.0")
-                        kl_loss = torch.tensor(100.0, device=device)
+                    elif kl_loss > 50.0:
+                        print(f"⚠️ Extremely high KL detected: {kl_loss.item():.2f}, clamping to 50.0")
+                        kl_loss = torch.tensor(50.0, device=device)
                 # Discriminator prediction on fake images (use final resolution)
                 fake_pred_g = discriminator(fake_images_64, text_embeddings) # Use G's output directly
 
@@ -1609,8 +1609,7 @@ def progressive_train_aurora_gan(
         # Set active resolutions for this phase
         generator.set_active_resolutions(active_resolutions)
         
-        original_lrs = []  # Store original learning rates for later restoration
-        original_lr_d = 0.0  # Store original D learning rate for later restoration
+        
         # Reset optimizer state for newly activated blocks
         if phase_idx > 0:  # Skip for first phase
             # Get the highest resolution from previous phase
@@ -1923,12 +1922,6 @@ def progressive_train_aurora_gan(
 
             # Close the progress bar for this epoch
             epoch_pbar.close()
-            if phase_idx > 0 and epoch == phase_start_epoch: # If first epoch of a new phase (after phase 0)
-                print(f"Restoring learning rates after initial adaptation.")
-                for i, param_group in enumerate(optimizer_g.param_groups):
-                    param_group['lr'] = original_lrs[i] # Restore from saved values
-                    print(f"  Group {i} LR restored to: {param_group['lr']:.6f}")
-                optimizer_d.param_groups[0]['lr'] = original_lr_d
 
             # ===== VALIDATION SECTION - From original train_aurora_gan =====
             if val_dataloader is not None:
