@@ -1619,11 +1619,11 @@ def progressive_train_aurora_gan(
                 
                 # Reset Adam state for these parameters
                 for param in new_params:
-                    param_id = id(param)
-                    if param_id in optimizer_g.state:
+                    # Use parameter directly as the key (PyTorch standard)
+                    if param in optimizer_g.state:
                         # Reset momentum and variance estimates
-                        optimizer_g.state[param_id]['exp_avg'] = torch.zeros_like(param.data)
-                        optimizer_g.state[param_id]['exp_avg_sq'] = torch.zeros_like(param.data)
+                        optimizer_g.state[param]['exp_avg'] = torch.zeros_like(param.data)
+                        optimizer_g.state[param]['exp_avg_sq'] = torch.zeros_like(param.data)
                 
                 # Consider using a lower learning rate for new params
                 # This requires modifying the optimizer's param groups
