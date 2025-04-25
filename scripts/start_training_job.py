@@ -71,7 +71,7 @@ def main():
             'VolumeSizeInGB': 30  # Increased size for ML datasets
         },
         StoppingCondition={
-            'MaxRuntimeInSeconds': 864000  
+            'MaxRuntimeInSeconds': 864000  # 10 days 
         },
         HyperParameters=hyperparameters,
         Environment=environment,
