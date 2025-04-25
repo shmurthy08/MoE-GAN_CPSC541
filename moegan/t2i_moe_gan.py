@@ -1525,7 +1525,23 @@ def progressive_train_aurora_gan(
     
     # Initialize optimizers
     weight_decay = 0.01
-    optimizer_g = torch.optim.AdamW(generator.parameters(), lr=lr, betas=(beta1, beta2), weight_decay=weight_decay)
+    # Build optimizer only on phase-1 blocks ([4,8])
+    first_res = progressive_schedule[0][0]  # e.g. [4,8]
+    initial_params = []
+    # always train mapping & text projector from the start
+    initial_params += list(generator.text_projection.parameters())
+    initial_params += list(generator.mapping.parameters())
+    initial_params.append(generator.constant)
+    # add only the 4×4 and 8×8 blocks
+    if 4 in first_res:
+        initial_params += list(generator.gen_block_4.parameters())
+    if 8 in first_res:
+        initial_params += list(generator.gen_block_8.parameters())
+
+    optimizer_g = torch.optim.AdamW(
+        initial_params,
+        lr=lr, betas=(beta1, beta2), weight_decay=weight_decay
+    )
     optimizer_d = torch.optim.AdamW(discriminator.parameters(), lr=lr, betas=(beta1, beta2), weight_decay=weight_decay)
 
     # Initialize AMP scaler for mixed precision training
@@ -1617,28 +1633,19 @@ def progressive_train_aurora_gan(
                         new_params.extend(list(generator.gen_block_64.parameters()))
                         new_params.extend(list(generator.to_rgb_64.parameters()))
                 
-                # Reset Adam state for these parameters
-                for param in new_params:
-                    # Use parameter directly as the key (PyTorch standard)
-                    if param in optimizer_g.state:
-                        # Reset momentum and variance estimates
-                        optimizer_g.state[param]['exp_avg'] = torch.zeros_like(param.data)
-                        optimizer_g.state[param]['exp_avg_sq'] = torch.zeros_like(param.data)
-                
-                # Consider using a lower learning rate for new params
-                # This requires modifying the optimizer's param groups
-                param_group = {'params': new_params, 'lr': lr * 0.5}  # Half learning rate for new blocks
-                optimizer_g.add_param_group(param_group)
-                print(f"Added {len(new_params)} parameters to optimizer with reduced learning rate")
-                print(f"Phase transition: Temporarily reducing learning rates.")
-                for i, param_group in enumerate(optimizer_g.param_groups):
-                    original_lrs.append(param_group['lr'])
-                    # Reduce LR significantly, e.g., by 5x or 10x
-                    param_group['lr'] = param_group['lr'] / 5.0
-                    print(f"  Group {i} LR reduced to: {param_group['lr']:.6f}")
-                # Apply to discriminator too if needed
-                original_lr_d = optimizer_d.param_groups[0]['lr']
-                optimizer_d.param_groups[0]['lr'] = original_lr_d / 5.0
+                # Filter out parameters already in optimizer to avoid duplication
+                existing = {p for g in optimizer_g.param_groups for p in g['params']}
+                truly_new = [p for p in new_params if p not in existing]
+
+                if truly_new:
+                    print(f"Adding {len(truly_new)} new params for resolutions {new_resolutions} to optimizer")
+                    # Add new parameters to optimizer with a different learning rate
+                    optimizer_g.add_param_group({
+                        'params': truly_new,
+                        'lr': lr * 0.5   # warm-up LR for new blocks
+                    })
+                else:
+                    print("No new params to add at this phase")
 
         
         # Train for this phase
