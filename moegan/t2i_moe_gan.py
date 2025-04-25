@@ -1070,7 +1070,7 @@ def train_aurora_gan(
     use_amp=True,          # Automatic mixed precision
     gradient_accumulation_steps=4, # Gradient accumulation for larger effective batch size
     checkpoint_activation=True,    # Enable gradient checkpointing
-    batch_memory_limit=10.0        # Memory limit per batch in GB
+    batch_memory_limit=11.0        # Memory limit per batch in GB
 ):
     """
     Train the Aurora GAN model with R1, Matching-Aware, Multi-level CLIP loss.
@@ -1827,11 +1827,11 @@ def progressive_train_aurora_gan(
                             original_requires_grad = kl_loss.requires_grad
                             kl_loss = torch.tensor(0.0, device=device, requires_grad=original_requires_grad)
                         # Check magnitude using .item()
-                        elif (kl_loss > 100.0).item(): # Add .item()
-                            print(f"⚠️ Extremely high KL detected: {kl_loss.item():.2f}, clamping to 100.0")
+                        elif (kl_loss > 70.0).item(): # Add .item()
+                            print(f"⚠️ Extremely high KL detected: {kl_loss.item():.2f}, clamping to 70.0")
                             # Ensure kl_loss requires grad if it's part of the computation graph before replacement
                             original_requires_grad = kl_loss.requires_grad
-                            kl_loss = torch.tensor(100.0, device=device, requires_grad=original_requires_grad)
+                            kl_loss = torch.tensor(70.0, device=device, requires_grad=original_requires_grad)
 
                             
                     # Discriminator prediction on fake images (use final resolution)

@@ -309,7 +309,7 @@ def main():
             metric_callback=metric_callback,
             gradient_accumulation_steps=9,
             checkpoint_activation=True,
-            batch_memory_limit=10.0,
+            batch_memory_limit=11.0,
             progressive_schedule=progressive_schedule
         )
         
