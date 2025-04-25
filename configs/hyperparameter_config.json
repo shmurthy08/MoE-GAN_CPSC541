@@ -19,7 +19,7 @@
     "integer_parameter_ranges": {
       "kl_annealing_epochs": {
         "min_value": 2,       
-        "max_value": 3,       
+        "max_value": 4,       
         "scaling_type": "Auto"
       }
     },

@@ -1,5 +1,6 @@
 # aurora_gan_moe.py
 import os
+import gc
 import numpy as np
 import torch
 import torch.nn as nn
@@ -10,6 +11,8 @@ import clip
 import math
 import logging
 from torch.distributions import Normal, kl_divergence
+from torch.optim.lr_scheduler import CosineAnnealingLR
+
 
 # Constants
 LATENT_DIM = 512
@@ -143,7 +146,7 @@ class ModulatedConv(nn.Module):
         
         # Initialize weights
         nn.init.kaiming_normal_(self.weight, a=0, mode='fan_in', nonlinearity='leaky_relu')
-        nn.init.ones_(self.modulation.weight)
+        nn.init.normal_(self.modulation.weight, mean=0.0, std=0.02)
         nn.init.zeros_(self.modulation.bias)
     
     def forward(self, x, w):
@@ -226,8 +229,9 @@ class ModulatedTransformationModule(nn.Module):
             grid = grid.repeat(batch_size, 1, 1, 1)
             
             # Add predicted offsets (scaled to be in range [-1, 1])
-            offsets = offsets.permute(0, 2, 3, 1) * 0.1  # Scale factor for stability
+            offsets = offsets.permute(0, 2, 3, 1) * 0.05  # Scale factor for stability
             grid = grid + offsets
+            grid = grid.clamp(-1, 1)  # Clamp to valid range for grid_sample
             
             # Sample input features with the deformed grid
             x = F.grid_sample(x, grid, mode='bilinear', align_corners=False)
@@ -1070,7 +1074,7 @@ def train_aurora_gan(
     use_amp=True,          # Automatic mixed precision
     gradient_accumulation_steps=4, # Gradient accumulation for larger effective batch size
     checkpoint_activation=True,    # Enable gradient checkpointing
-    batch_memory_limit=10.0        # Memory limit per batch in GB
+    batch_memory_limit=11.0        # Memory limit per batch in GB
 ):
     """
     Train the Aurora GAN model with R1, Matching-Aware, Multi-level CLIP loss.
@@ -1126,7 +1130,7 @@ def train_aurora_gan(
     # Training loop
     step = 0
     for epoch in range(num_epochs):
-        print(f"Starting epoch {epoch+1}/{num_epochs}")
+        print(f"\n{'='*20} Epoch {epoch+1}/{num_epochs} {'='*20}")
         
         # Calculate annealing factors for temperature and KL weight
         # Start with high temperature (more uniform routing) and low KL weight
@@ -1227,10 +1231,10 @@ def train_aurora_gan(
                 if scaler:
                     # Clip before scaler step
                     scaler.unscale_(optimizer_d)
-                    torch.nn.utils.clip_grad_norm_(discriminator.parameters(), max_norm=0.8)
+                    torch.nn.utils.clip_grad_norm_(discriminator.parameters(), max_norm=0.7)
                     scaler.step(optimizer_d)
                 else:
-                    torch.nn.utils.clip_grad_norm_(discriminator.parameters(), max_norm=0.8)
+                    torch.nn.utils.clip_grad_norm_(discriminator.parameters(), max_norm=0.7)
                     optimizer_d.step()
                 
                 if scaler:
@@ -1271,6 +1275,10 @@ def train_aurora_gan(
 
                 # --- Total Generator Loss ---
                 g_loss = g_loss_gan + g_loss_clip + balance_loss
+                if torch.isnan(g_loss).item() or torch.isinf(g_loss).item():
+                    print("⚠️ NaN or Inf detected in generator loss! Skipping batch.")
+                    optimizer_g.zero_grad()  # Clear gradients
+                    continue
                 
                 # Add KL loss separately to avoid tensor in boolean context
                 if kl_loss is not None:
@@ -1543,9 +1551,23 @@ def progressive_train_aurora_gan(
         lr=lr, betas=(beta1, beta2), weight_decay=weight_decay
     )
     optimizer_d = torch.optim.AdamW(discriminator.parameters(), lr=lr, betas=(beta1, beta2), weight_decay=weight_decay)
-
+    
+  
     # Initialize AMP scaler for mixed precision training
     scaler = torch.cuda.amp.GradScaler() if use_amp and torch.cuda.is_available() else None
+    
+      # Create schedulers for both optimizers
+    lr_scheduler_g = CosineAnnealingLR(
+        optimizer_g,
+        T_max=num_epochs - kl_annealing_epochs,  # Exclude warmup epochs
+        eta_min=lr * 0.05  # Minimum LR at 5% of initial
+    )
+    lr_scheduler_d = CosineAnnealingLR(
+        optimizer_d,
+        T_max=num_epochs - kl_annealing_epochs,
+        eta_min=lr * 0.05
+    )
+    
     
     # Initialize loss function
     gan_loss = AuroraGANLoss(device)
@@ -1598,6 +1620,7 @@ def progressive_train_aurora_gan(
     # Training loop with progressive phases
     step = 0
     for phase_idx, (active_resolutions, _) in enumerate(progressive_schedule):
+        
         phase_start_epoch = total_epochs_processed
         phase_end_epoch = phase_start_epoch + phase_epochs[phase_idx]
         
@@ -1609,7 +1632,9 @@ def progressive_train_aurora_gan(
         # Set active resolutions for this phase
         generator.set_active_resolutions(active_resolutions)
         
-        
+        torch.cuda.empty_cache()
+        gc.collect()
+        print(f"Memory cleared at start of phase {phase_idx+1}")
         # Reset optimizer state for newly activated blocks
         if phase_idx > 0:  # Skip for first phase
             # Get the highest resolution from previous phase
@@ -1659,26 +1684,21 @@ def progressive_train_aurora_gan(
             # Calculate annealing factors specific to phase
             temperature_factor = max(1.0, 3.0 - phase_epoch * (2.0 / max(1, phase_epochs_total))) 
             # Cosine KL annealing with phase awareness
+            # Enhanced KL annealing with phase awareness
             if phase_idx == 0:  
-                # First phase - standard linear warmup
-                kl_warmup_factor = min(1.0, phase_epoch / min(kl_annealing_epochs, phase_epochs_total))
+                # First phase - standard linear warmup but over more epochs
+                kl_warmup_factor = min(1.0, phase_epoch / kl_annealing_epochs)
             else:
-                # Later phases - start from 30% and use cosine schedule
-                min_kl_value = 0.3  # Never drop below 30% after first phase
+                # Later phases - use cosine schedule with higher starting point
+                min_kl_value = 0.5  # Higher floor for stability in later phases
                 phase_progress = phase_epoch / phase_epochs_total
                 
-                # Cosine schedule: smooth transition that starts higher and ends at full strength
+                # Cosine schedule for smooth transitions
                 kl_warmup_factor = min_kl_value + (1.0 - min_kl_value) * (
                     0.5 * (1 + math.cos(math.pi * (1 - phase_progress)))
                 )
-                
-                # Additional damping for early epochs of a new phase
-                if phase_epoch < 3:  # First few epochs of a new phase
-                    damping = phase_epoch / 3  # Gradual increase over first 3 epochs
-                    kl_warmup_factor = min_kl_value + (kl_warmup_factor - min_kl_value) * damping
 
             effective_kl_weight = kl_weight * kl_warmup_factor
-
             # Add debug logging
             print(f"  Global progress: {global_progress:.2f}, Phase progress: {phase_epoch}/{phase_epochs_total}")
             print(f"  KL warmup factor: {kl_warmup_factor:.3f}")
@@ -1700,9 +1720,12 @@ def progressive_train_aurora_gan(
                         optimizer_g.param_groups[group_idx]['lr'] = current_lr * 0.9 + target_lr * 0.1
                         
                         print(f"  Warming up LR for new blocks: {optimizer_g.param_groups[group_idx]['lr']:.6f}")
-            
+
+                    
             
             # ==== TRAINING EPOCH LOOP - From original train_aurora_gan ====
+            
+            
             epoch_pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{num_epochs}")
             
             running_d_loss = 0.0
@@ -1827,11 +1850,11 @@ def progressive_train_aurora_gan(
                             original_requires_grad = kl_loss.requires_grad
                             kl_loss = torch.tensor(0.0, device=device, requires_grad=original_requires_grad)
                         # Check magnitude using .item()
-                        elif (kl_loss > 100.0).item(): # Add .item()
-                            print(f"⚠️ Extremely high KL detected: {kl_loss.item():.2f}, clamping to 100.0")
+                        elif (kl_loss > 70.0).item(): # Add .item()
+                            print(f"⚠️ Extremely high KL detected: {kl_loss.item():.2f}, clamping to 70.0")
                             # Ensure kl_loss requires grad if it's part of the computation graph before replacement
                             original_requires_grad = kl_loss.requires_grad
-                            kl_loss = torch.tensor(100.0, device=device, requires_grad=original_requires_grad)
+                            kl_loss = torch.tensor(70.0, device=device, requires_grad=original_requires_grad)
 
                             
                     # Discriminator prediction on fake images (use final resolution)
@@ -1998,7 +2021,7 @@ def progressive_train_aurora_gan(
                         })
 
                 val_pbar.close()
-
+                
                 # Average losses
                 if val_samples > 0:
                     val_d_loss_gan /= val_samples
@@ -2027,6 +2050,14 @@ def progressive_train_aurora_gan(
 
                 generator.train()
                 discriminator.train()
+                if epoch >= kl_annealing_epochs:
+                    lr_scheduler_g.step()
+                    lr_scheduler_d.step()
+                    
+                    # Log current learning rates
+                    current_lr_g = lr_scheduler_g.get_last_lr()[0]
+                    current_lr_d = lr_scheduler_d.get_last_lr()[0]
+                    print(f"  Current learning rates - G: {current_lr_g:.8f}, D: {current_lr_d:.8f}")
 
             # Save model after each epoch
             # epoch_save_path = os.path.join(save_dir, f"aurora_checkpoint_epoch_{epoch+1}.pt")

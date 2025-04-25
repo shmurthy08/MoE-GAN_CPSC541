@@ -227,7 +227,7 @@ def main():
             'VolumeSizeInGB': 30
         },
         'StoppingCondition': {
-            'MaxRuntimeInSeconds': 86400  
+            'MaxRuntimeInSeconds': 864000  
         },
         'Environment': environment
     }
