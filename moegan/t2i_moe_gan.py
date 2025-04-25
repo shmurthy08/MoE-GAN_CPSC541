@@ -1620,9 +1620,7 @@ def progressive_train_aurora_gan(
     # Training loop with progressive phases
     step = 0
     for phase_idx, (active_resolutions, _) in enumerate(progressive_schedule):
-        if phase_epoch == 0:
-            torch.cuda.empty_cache()
-            gc.collect()
+        
         phase_start_epoch = total_epochs_processed
         phase_end_epoch = phase_start_epoch + phase_epochs[phase_idx]
         
