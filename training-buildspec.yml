@@ -42,17 +42,17 @@ phases:
         # Create predefined hyperparameters file
         cat > best_hyperparameters.json << EOF
         {
-          "balance_weight": "0.01",
+          "balance_weight": "0.006488147350209087",
           "batch_size": "9",
-          "beta1": "0.5",
-          "beta2": "0.999",
-          "clip_weight_32": "0.05",
-          "clip_weight_64": "0.1",
+          "beta1": "0.882075398724864",
+          "beta2": "0.9385630453882949",
+          "clip_weight_8": "0.04016935445931133",
+          "clip_weight_16": "0.19197351204230995",
           "epochs": "50",
           "kl_annealing_epochs": "20",
-          "kl_weight": "0.0006752514413805058",
-          "learning_rate": "0.00045143030062909416",
-          "r1_gamma": "10.771542908988597"
+          "kl_weight": "0.0028913304240925372",
+          "learning_rate": "0.000671592452618617",
+          "r1_gamma": "9.66634402753149"
         }
         EOF
         echo "Using predefined optimal hyperparameters for 50 epochs"
