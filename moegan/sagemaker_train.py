@@ -128,7 +128,9 @@ def main():
     
     try:
         # Memory optimization settings
-        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'  # Reduced from 512
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128,garbage_collection_threshold:0.6"
+        torch.backends.cuda.matmul.allow_tf32 = True  # Enable TF32 
+        torch.backends.cudnn.allow_tf32 = True # Enable TF32 for cuDNN
         torch.backends.cudnn.benchmark = False
         torch.backends.cudnn.deterministic = True
         
@@ -285,9 +287,10 @@ def main():
         #     batch_memory_limit=10.0
         # )
         progressive_schedule = [
-            ([4, 8], 0.33),            # First 2 epochs: train 4x4 and 8x8 only
-            ([4, 8, 16, 32], 0.33),    # Next 2 epochs: add 16x16 and 32x32
-            ([4, 8, 16, 32, 64], 0.34) # Final 2 epochs: full 64x64 model
+            ([4, 8], 0.20),            # First 30 epochs: train 4x4 and 8x8 only
+            ([4, 8, 16], 0.25),        # Next 38 epochs: add 16x16
+            ([4, 8, 16, 32], 0.30),    # Next 45 epochs: add 32x32
+            ([4, 8, 16, 32, 64], 0.25) # Final 37 epochs: full 64x64 model
         ]
         generator, discriminator = progressive_train_aurora_gan(
             train_dataloader, 

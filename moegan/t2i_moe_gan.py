@@ -1277,7 +1277,7 @@ def train_aurora_gan(
                 # Apply safe handling to KL loss
                 if kl_loss is not None:
                     # Detect and prevent extreme KL values
-                    if torch.isnan(kl_loss) or torch.isinf(kl_loss):
+                    if torch.isnan(kl_loss).item() or torch.isinf(kl_loss).item():
                         print(f"⚠️ NaN/Inf detected in KL loss! Replacing with zero.")
                         kl_loss = torch.tensor(0.0, device=device)
                     elif kl_loss > 50.0:
@@ -1534,10 +1534,10 @@ def progressive_train_aurora_gan(
     # Use default progressive schedule if not provided
     if progressive_schedule is None:
         progressive_schedule = [
-            ([4, 8], 0.3),            # Train 4×4 and 8×8 for 30% of epochs
-            ([4, 8, 16], 0.2),        # Add 16×16 for next 20%
-            ([4, 8, 16, 32], 0.25),   # Add 32×32 for next 25%
-            ([4, 8, 16, 32, 64], 0.25) # Full model for final 25%
+            ([4, 8], 0.20),            # First 30 epochs: train 4x4 and 8x8 only
+            ([4, 8, 16], 0.25),        # Next 38 epochs: add 16x16
+            ([4, 8, 16, 32], 0.30),    # Next 45 epochs: add 32x32
+            ([4, 8, 16, 32, 64], 0.25) # Final 37 epochs: full 64x64 model
         ]
     
     # Create save directory
@@ -1555,21 +1555,13 @@ def progressive_train_aurora_gan(
     # Initialize optimizers
     weight_decay = 0.01
     # Build optimizer only on phase-1 blocks ([4,8])
-    first_res = progressive_schedule[0][0]  # e.g. [4,8]
-    initial_params = []
-    # always train mapping & text projector from the start
-    initial_params += list(generator.text_projection.parameters())
-    initial_params += list(generator.mapping.parameters())
-    initial_params.append(generator.constant)
-    # add only the 4×4 and 8×8 blocks
-    if 4 in first_res:
-        initial_params += list(generator.gen_block_4.parameters())
-    if 8 in first_res:
-        initial_params += list(generator.gen_block_8.parameters())
 
-    optimizer_g = torch.optim.AdamW(
-        initial_params,
-        lr=lr, betas=(beta1, beta2), weight_decay=weight_decay
+    optimizer_g = create_optimizer_for_active_blocks(
+        generator, 
+        progressive_schedule[0][0],  # First phase's resolutions
+        lr=lr, 
+        betas=(beta1, beta2), 
+        weight_decay=weight_decay
     )
     optimizer_d = torch.optim.AdamW(discriminator.parameters(), lr=lr, betas=(beta1, beta2), weight_decay=weight_decay)
     
@@ -1672,6 +1664,9 @@ def progressive_train_aurora_gan(
                 betas=(beta1, beta2), 
                 weight_decay=weight_decay
             )
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
+                print(f"Peak memory stats reset after optimizer recreation")
             
             # Create new scheduler for the optimizer
             lr_scheduler_g = CosineAnnealingLR(
