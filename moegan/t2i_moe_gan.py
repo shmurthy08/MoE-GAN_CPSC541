@@ -1881,10 +1881,9 @@ def progressive_train_aurora_gan(
                     # --- Total Generator Loss ---
                     g_loss = g_loss_gan + g_loss_clip + balance_loss
                     if torch.isnan(g_loss).item() or torch.isinf(g_loss).item():
-                        print("⚠️ NaN or Inf detected in generator loss! Skipping batch.")
-                        optimizer_g.zero_grad()  # Clear gradients
-                        continue
-                    
+                        print("⚠️ NaN or Inf detected in generator loss! Resetting Gradient.")
+                        original_requires_grad = g_loss.requires_grad
+                        g_loss = torch.tensor(0.0, device=device, requires_grad=original_requires_grad)  # Reset to zero to avoid NaN/Inf propagation      
                     # Add KL loss separately to avoid tensor in boolean context
                     if kl_loss is not None:
                         # Use item() if it's a scalar tensor or torch.is_tensor(kl_loss) to check
