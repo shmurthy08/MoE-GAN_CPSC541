@@ -54,7 +54,7 @@ def get_best_tuning_job(tuning_job_name):
         }
     }
 
-def deploy_best_model(best_model_info, role_arn, image_uri, model_name=None, endpoint_config_name=None, endpoint_name=None, instance_type='ml.g5.xlarge'):
+def deploy_best_model(best_model_info, role_arn, image_uri, model_name=None, endpoint_config_name=None, endpoint_name=None, instance_type='ml.g6.xlarge'):
     """
     Deploy the best model from a hyperparameter tuning job
     """

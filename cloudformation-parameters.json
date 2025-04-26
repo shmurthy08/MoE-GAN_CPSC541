@@ -2,7 +2,7 @@
     "Parameters": {
       "ProjectName": "moe-gan",
       "EnvironmentName": "dev",
-      "TrainingInstanceType": "ml.g5.xlarge",
-      "InferenceInstanceType": "ml.g5.xlarge"
+      "TrainingInstanceType": "ml.g6.xlarge",
+      "InferenceInstanceType": "ml.g6.xlarge"
     }
   }

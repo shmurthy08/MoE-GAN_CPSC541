@@ -91,7 +91,7 @@ phases:
               --prefix training/$TRAINING_JOB_NAME \
               --data-bucket $S3_BUCKET \
               --data-prefix $S3_DATA_PREFIX \
-              --instance-type ml.g5.xlarge \
+              --instance-type ml.g6.xlarge \
               $HYPERPARAMS_ARG \
               --wait || exit 1  # Exit with error code if job fails
               
