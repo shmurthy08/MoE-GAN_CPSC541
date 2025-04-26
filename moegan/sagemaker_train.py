@@ -199,8 +199,8 @@ def main():
         
         # Load training dataset (USING ONLY 50% OF DATA FOR FASTER TRAINING)
         print("Loading training data from {} and {}".format(train_img_path, train_emb_path))
-        train_dataset = SimpleDataset(train_img_path, train_emb_path, use_percentage=0.50)
-        print("Loaded {} training samples (50% of total)".format(len(train_dataset)))
+        train_dataset = SimpleDataset(train_img_path, train_emb_path, use_percentage=0.25)
+        print("Loaded {} training samples (25% of total)".format(len(train_dataset)))
         
         # Setup CloudWatch metrics
         cloudwatch = boto3.client('cloudwatch', region_name=os.environ.get('AWS_REGION', 'us-west-2'))
@@ -289,7 +289,7 @@ def main():
             metric_callback=metric_callback,
             gradient_accumulation_steps=8,
             checkpoint_activation=True,
-            batch_memory_limit=20.0,  # Set to 20GB for ml.g6.xlarge (24GB GPU)
+            batch_memory_limit=20.0,  # Set to 20GB for ml.g5.xlarge (24GB GPU)
             max_resolution=16        # Limit to 16x16 resolution
         )
         

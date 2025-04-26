@@ -1280,6 +1280,9 @@ def train_aurora_gan(
             # Check for NaN/Inf in discriminator loss
             if torch.isnan(d_loss).item() or torch.isinf(d_loss).item():
                 print(f"⚠️ NaN/Inf detected in discriminator loss! Skipping this batch.")
+                # Set d_loss to zero to avoid NaN/Inf in optimizer step
+                original_requires_grad = d_loss.requires_grad
+                d_loss = torch.tensor(0.0, device=device, requires_grad=original_requires_grad)
                 continue
             
             # Scale the loss if using AMP
@@ -1330,8 +1333,7 @@ def train_aurora_gan(
                 if kl_loss is not None:
                     # Print high KL values
                     if kl_loss > 50.0:
-                        print(f"⚠️ High KL detected: {kl_loss.item():.2f}")
-                    
+                        kl_loss = torch.clamp(kl_loss, max=50.0)
                     # Only reset for NaN/Inf
                     if torch.isnan(kl_loss).item() or torch.isinf(kl_loss).item():
                         print(f"⚠️ NaN/Inf detected in KL loss! Replacing with zero.")
