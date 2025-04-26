@@ -128,7 +128,9 @@ def main():
     
     try:
         # Memory optimization settings
-        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'  # Reduced from 512
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128,garbage_collection_threshold:0.6"
+        torch.backends.cuda.matmul.allow_tf32 = True  # Enable TF32 
+        torch.backends.cudnn.allow_tf32 = True # Enable TF32 for cuDNN
         torch.backends.cudnn.benchmark = False
         torch.backends.cudnn.deterministic = True
         
@@ -193,7 +195,7 @@ def main():
         
         # Load training dataset (USING ONLY 50% OF DATA FOR FASTER TRAINING)
         print("Loading training data from {} and {}".format(train_img_path, train_emb_path))
-        train_dataset = SimpleDataset(train_img_path, train_emb_path, use_percentage=0.2)
+        train_dataset = SimpleDataset(train_img_path, train_emb_path, use_percentage=0.35)
         print("Loaded {} training samples (20% of total)".format(len(train_dataset)))
         
         # Setup CloudWatch metrics
@@ -285,9 +287,10 @@ def main():
         #     batch_memory_limit=10.0
         # )
         progressive_schedule = [
-            ([4, 8], 0.33),            # First 2 epochs: train 4x4 and 8x8 only
-            ([4, 8, 16, 32], 0.33),    # Next 2 epochs: add 16x16 and 32x32
-            ([4, 8, 16, 32, 64], 0.34) # Final 2 epochs: full 64x64 model
+            ([4, 8], 0.20),            # First 30 epochs: train 4x4 and 8x8 only
+            ([4, 8, 16], 0.25),        # Next 38 epochs: add 16x16
+            ([4, 8, 16, 32], 0.30),    # Next 45 epochs: add 32x32
+            ([4, 8, 16, 32, 64], 0.25) # Final 37 epochs: full 64x64 model
         ]
         generator, discriminator = progressive_train_aurora_gan(
             train_dataloader, 
@@ -307,9 +310,9 @@ def main():
             log_interval=100,
             save_interval=500,
             metric_callback=metric_callback,
-            gradient_accumulation_steps=9,
+            gradient_accumulation_steps=8,
             checkpoint_activation=True,
-            batch_memory_limit=11.0,
+            batch_memory_limit=12.0,
             progressive_schedule=progressive_schedule
         )
         

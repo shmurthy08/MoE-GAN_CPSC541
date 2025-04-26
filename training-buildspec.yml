@@ -38,60 +38,27 @@ phases:
           INFERENCE_IMAGE_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${PROJECT_NAME}-${ENVIRONMENT}-repository:latest-inference"
         fi
       
-      # NEW SECTION: Fetch best hyperparameters from tuning job
       - |
-        # Find the latest completed hyperparameter tuning job
-        echo "Looking for completed hyperparameter tuning jobs..."
-        HPO_JOB=$(aws sagemaker list-hyper-parameter-tuning-jobs \
-          --name-contains ${PROJECT_NAME}-${ENVIRONMENT} \
-          --sort-by "CreationTime" \
-          --sort-order "Descending" \
-          --status-equals "Completed" \
-          --query "HyperParameterTuningJobSummaries[0].HyperParameterTuningJobName" \
-          --output text)
-        
-        if [ "$HPO_JOB" != "None" ] && [ ! -z "$HPO_JOB" ]; then
-          echo "Found completed hyperparameter tuning job: $HPO_JOB"
-          
-          # Get the best training job name
-          BEST_TRAINING_JOB=$(aws sagemaker describe-hyper-parameter-tuning-job \
-            --hyper-parameter-tuning-job-name "$HPO_JOB" \
-            --query "BestTrainingJob.TrainingJobName" \
-            --output text)
-          
-          if [ "$BEST_TRAINING_JOB" != "None" ] && [ ! -z "$BEST_TRAINING_JOB" ]; then
-            echo "Best training job: $BEST_TRAINING_JOB"
-            
-            # Create a file to store hyperparameters
-            # Extract hyperparameters from the best training job
-            aws sagemaker describe-training-job \
-              --training-job-name "$BEST_TRAINING_JOB" \
-              --query "HyperParameters" \
-              --output json > best_hyperparameters.json
-            
-            # Set epochs to 50 for the final training
-            python -c "
-            import json
-            with open('best_hyperparameters.json', 'r') as f:
-              hp = json.load(f)
-            # Set epochs to a higher value for final training
-            hp['epochs'] = '80'  
-            with open('best_hyperparameters.json', 'w') as f:
-              json.dump(hp, f)
-            "
-            
-            echo "Using optimal hyperparameters from tuning with 50 epochs for final training"
-            cat best_hyperparameters.json
-            USING_BEST_PARAMS="true"
-          else
-            echo "No best training job found, using default hyperparameters"
-            USING_BEST_PARAMS="false"
-          fi
-        else
-          echo "No completed hyperparameter tuning jobs found, using default hyperparameters"
-          USING_BEST_PARAMS="false"
-        fi
-  
+        # Create predefined hyperparameters file
+        cat > best_hyperparameters.json << EOF
+        {
+          "balance_weight": "0.01",
+          "batch_size": "11",
+          "beta1": "0.5",
+          "beta2": "0.999",
+          "clip_weight_32": "0.05",
+          "clip_weight_64": "0.1",
+          "epochs": "150",
+          "kl_annealing_epochs": "100",
+          "kl_weight": "0.0006752514413805058",
+          "learning_rate": "0.00045143030062909416",
+          "r1_gamma": "10.771542908988597"
+        }
+        EOF
+        echo "Using predefined optimal hyperparameters for 150 epochs"
+        cat best_hyperparameters.json
+        USING_BEST_PARAMS="true"
+        echo "Using optimal hyperparameters: $USING_BEST_PARAMS"
   build:
     commands:
       # Check if training data exists in S3
