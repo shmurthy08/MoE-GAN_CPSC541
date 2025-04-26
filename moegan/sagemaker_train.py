@@ -8,6 +8,8 @@ import numpy as np
 import boto3
 import sys
 import traceback
+import gc
+from contextlib import nullcontext
 
 # Debug import issues by logging environment information
 print("Current working directory: {}".format(os.getcwd()))
@@ -22,7 +24,6 @@ if os.path.exists('/app'):
 class SimpleDataset(Dataset):
     """Simple dataset class that just loads preprocessed .npy files"""
     
-    # Add this function to SimpleDataset in sagemaker_train.py
     def __init__(self, images_file, text_embeddings_file, use_percentage=1.0):
         """
         Args:
@@ -68,7 +69,7 @@ class SimpleDataset(Dataset):
 
 # Import GAN components
 try:
-    from t2i_moe_gan import train_aurora_gan, progressive_train_aurora_gan, AuroraGenerator, AuroraDiscriminator
+    from t2i_moe_gan import train_aurora_gan, AuroraGenerator, AuroraDiscriminator
     print("✓ Successfully imported GAN components")
 except ImportError as e:
     print("Error importing GAN components: {}".format(str(e)))
@@ -90,10 +91,10 @@ def parse_sagemaker_parameters():
     params = {}
     for key, value in hyperparameters.items():
         # Convert numerical parameters to the right type
-        if key in ['batch_size', 'epochs', 'kl_annealing_epochs']:
+        if key in ['batch_size', 'epochs', 'kl_annealing_epochs', 'lr_warmup_epochs']:
             params[key] = int(value)
         elif key in ['learning_rate', 'beta1', 'beta2', 'r1_gamma', 
-                    'clip_weight_64', 'clip_weight_32', 'kl_weight', 'balance_weight']:
+                    'clip_weight_16', 'clip_weight_8', 'kl_weight', 'balance_weight']:
             params[key] = float(value)
         else:
             params[key] = value
@@ -127,8 +128,8 @@ def main():
     print("Starting MoE-GAN training in SageMaker environment")
     
     try:
-        # Memory optimization settings
-        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128,garbage_collection_threshold:0.6"
+        # Aggressive memory optimization settings
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128,garbage_collection_threshold:0.8"
         torch.backends.cuda.matmul.allow_tf32 = True  # Enable TF32 
         torch.backends.cudnn.allow_tf32 = True # Enable TF32 for cuDNN
         torch.backends.cudnn.benchmark = False
@@ -142,21 +143,24 @@ def main():
         
         # Enable automatic mixed precision training
         use_amp = True
-        scaler = torch.cuda.amp.GradScaler() if use_amp else None
         
         # Set memory efficient attention
         os.environ['PYTORCH_ATTENTION_IMPLEMENTATION'] = 'mem_efficient'
         
-        # Use pinned memory for faster transfers but less host memory
+        # More precise lower-precision math operations
+        torch.set_float32_matmul_precision('medium')
+        
+        # Use pinned memory for faster transfers
         pin_memory = torch.cuda.is_available()
         
         # Check if CUDA is available
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print("Using device: {}".format(device))
         
-        # Set optimal tensor layout
+        # Log GPU info
         if torch.cuda.is_available():
-            torch.backends.cuda.matmul.allow_tf32 = True  # Allow TF32 for faster training
+            print(f"GPU: {torch.cuda.get_device_name(0)}")
+            print(f"Total GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
             
         # Parse hyperparameters
         params = parse_sagemaker_parameters()
@@ -195,8 +199,8 @@ def main():
         
         # Load training dataset (USING ONLY 50% OF DATA FOR FASTER TRAINING)
         print("Loading training data from {} and {}".format(train_img_path, train_emb_path))
-        train_dataset = SimpleDataset(train_img_path, train_emb_path, use_percentage=0.25)
-        print("Loaded {} training samples (25% of total)".format(len(train_dataset)))
+        train_dataset = SimpleDataset(train_img_path, train_emb_path, use_percentage=0.50)
+        print("Loaded {} training samples (50% of total)".format(len(train_dataset)))
         
         # Setup CloudWatch metrics
         cloudwatch = boto3.client('cloudwatch', region_name=os.environ.get('AWS_REGION', 'us-west-2'))
@@ -223,10 +227,10 @@ def main():
             except Exception as e:
                 print("Failed to log metric {}: {}".format(name, e))
         
-        # Create training dataloader with batch size 16
+        # Create training dataloader with batch size 24
         train_dataloader = DataLoader(
             train_dataset, 
-            batch_size=params.get('batch_size', 16),  # Changed to 16
+            batch_size=params.get('batch_size', 24),  # Using 24 for better memory usage
             shuffle=True, 
             num_workers=max(1, os.cpu_count() // 2 if os.cpu_count() is not None else 1), 
             pin_memory=True,
@@ -241,7 +245,7 @@ def main():
             
             val_dataloader = DataLoader(
                 val_dataset,
-                batch_size=params.get('batch_size', 16),  # Changed to 16 for consistency
+                batch_size=params.get('batch_size', 24),  # Same as train for consistency
                 shuffle=False,
                 num_workers=max(1, os.cpu_count() // 2 if os.cpu_count() is not None else 1),
                 pin_memory=True
@@ -262,48 +266,21 @@ def main():
                 
             # Return True to continue training
             return True
-            
+        
         # Train model with the metric reporting callback
-        # generator, discriminator = train_aurora_gan(
-        #     train_dataloader, 
-        #     val_dataloader=val_dataloader,
-        #     num_epochs=params.get('epochs', 5),
-        #     lr=params.get('learning_rate', 0.0002),
-        #     beta1=params.get('beta1', 0.5),
-        #     beta2=params.get('beta2', 0.999),
-        #     r1_gamma=params.get('r1_gamma', 10.0),
-        #     clip_weight_64=params.get('clip_weight_64', 0.1),
-        #     clip_weight_32=params.get('clip_weight_32', 0.05),
-        #     kl_weight=params.get('kl_weight', 0.001),
-        #     kl_annealing_epochs=params.get('kl_annealing_epochs', 1),
-        #     balance_weight=params.get('balance_weight', 0.01),
-        #     device=device,
-        #     save_dir=save_dir,
-        #     log_interval=100,
-        #     save_interval=500,
-        #     metric_callback=metric_callback,
-        #     gradient_accumulation_steps=9,
-        #     checkpoint_activation=True,
-        #     batch_memory_limit=10.0
-        # )
-        progressive_schedule = [
-            ([4, 8], 0.20),            # First 30 epochs: train 4x4 and 8x8 only
-            ([4, 8, 16], 0.25),        # Next 38 epochs: add 16x16
-            ([4, 8, 16, 32], 0.30),    # Next 45 epochs: add 32x32
-            ([4, 8, 16, 32, 64], 0.25) # Final 37 epochs: full 64x64 model
-        ]
-        generator, discriminator = progressive_train_aurora_gan(
+        generator, discriminator = train_aurora_gan(
             train_dataloader, 
             val_dataloader=val_dataloader,
-            num_epochs=params.get('epochs', 5),
+            num_epochs=params.get('epochs', 50),  # Set default to 50 epochs
             lr=params.get('learning_rate', 0.0002),
             beta1=params.get('beta1', 0.5),
             beta2=params.get('beta2', 0.999),
             r1_gamma=params.get('r1_gamma', 10.0),
-            clip_weight_64=params.get('clip_weight_64', 0.1),
-            clip_weight_32=params.get('clip_weight_32', 0.05),
+            clip_weight_16=params.get('clip_weight_16', 0.1),
+            clip_weight_8=params.get('clip_weight_8', 0.05),
             kl_weight=params.get('kl_weight', 0.001),
-            kl_annealing_epochs=params.get('kl_annealing_epochs', 1),
+            kl_annealing_epochs=params.get('kl_annealing_epochs', 5),
+            lr_warmup_epochs=params.get('lr_warmup_epochs', 3),
             balance_weight=params.get('balance_weight', 0.01),
             device=device,
             save_dir=save_dir,
@@ -312,19 +289,18 @@ def main():
             metric_callback=metric_callback,
             gradient_accumulation_steps=8,
             checkpoint_activation=True,
-            batch_memory_limit=14.00000,
-            progressive_schedule=progressive_schedule
+            batch_memory_limit=20.0,  # Set to 20GB for ml.g6.xlarge (24GB GPU)
+            max_resolution=16        # Limit to 16x16 resolution
         )
         
         # Save final model 
-        ### UNCOMMENT WHEN TRAINING FINAL MODEL ###
-        # final_model_path = os.path.join(MODEL_PATH, 'aurora_model_final.pt')
-        # torch.save({
-        #     'generator': generator.state_dict(),
-        #     'discriminator': discriminator.state_dict(),
-        # }, final_model_path)
+        final_model_path = os.path.join(MODEL_PATH, 'aurora_model_final.pt')
+        torch.save({
+            'generator': generator.state_dict(),
+            'discriminator': discriminator.state_dict(),
+        }, final_model_path)
         
-        print("Training complete")
+        print("Training complete, model saved to {}".format(final_model_path))
     
     except Exception as e:
         print("\n" + "="*50)
