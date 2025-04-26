@@ -289,7 +289,7 @@ def main():
             metric_callback=metric_callback,
             gradient_accumulation_steps=8,
             checkpoint_activation=True,
-            batch_memory_limit=20.0,  # Set to 20GB for ml.g6.xlarge (24GB GPU)
+            batch_memory_limit=20.0,  # Set to 20GB for ml.g5.xlarge (24GB GPU)
             max_resolution=16        # Limit to 16x16 resolution
         )
         
