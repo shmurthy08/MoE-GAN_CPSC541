@@ -18,7 +18,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 LATENT_DIM = 512
 TEXT_EMBEDDING_DIM = 512
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-NUM_EXPERTS = 8  # Number of experts in MoE layers
+NUM_EXPERTS = 4  # Number of experts in MoE layers
 CLIP_MODEL_TYPE = "ViT-B/32"  # Vision Transformer model
 
 _clip_model = None
@@ -1511,7 +1511,7 @@ def progressive_train_aurora_gan(
     log_interval=10, save_interval=1000,
     metric_callback=None,
     use_amp=True,
-    gradient_accumulation_steps=4,
+    gradient_accumulation_steps=8,
     checkpoint_activation=True,
     batch_memory_limit=10.0,
     # Progressive training parameters
@@ -1523,8 +1523,8 @@ def progressive_train_aurora_gan(
     Args:
         progressive_schedule: List of (resolution_list, epoch_fraction) tuples
             Example: [
-                ([4, 8], 0.3),       # Train 4×4 and 8×8 for 30% of epochs
-                ([4, 8, 16], 0.2),    # Add 16×16 for next 20%
+                ([4, 8], 0.3),         # Train 4×4 and 8×8 for 30% of epochs
+                ([4, 8, 16], 0.2),     # Add 16×16 for next 20%
                 ([4, 8, 16, 32], 0.25), # Add 32×32 for next 25%
                 ([4, 8, 16, 32, 64], 0.25) # Full model for final 25%
             ]
@@ -1534,18 +1534,37 @@ def progressive_train_aurora_gan(
     # Use default progressive schedule if not provided
     if progressive_schedule is None:
         progressive_schedule = [
-            ([4, 8], 0.20),            # First 30 epochs: train 4x4 and 8x8 only
-            ([4, 8, 16], 0.25),        # Next 38 epochs: add 16x16
-            ([4, 8, 16, 32], 0.30),    # Next 45 epochs: add 32x32
-            ([4, 8, 16, 32, 64], 0.25) # Final 37 epochs: full 64x64 model
+            ([4, 8], 0.20),            # First 20% epochs: train 4x4 and 8x8 only
+            ([4, 8, 16], 0.25),        # Next 25% epochs: add 16x16
+            ([4, 8, 16, 32], 0.30),    # Next 30% epochs: add 32x32
+            ([4, 8, 16, 32, 64], 0.25) # Final 25% epochs: full 64x64 model
         ]
     
     # Create save directory
     os.makedirs(save_dir, exist_ok=True)
 
+    # Set memory optimization settings
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128,garbage_collection_threshold:0.6"
+    torch.backends.cuda.matmul.allow_tf32 = True  # Enable TF32 
+    torch.backends.cudnn.allow_tf32 = True  # Enable TF32 for cuDNN
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+    
+    # Enable gradient checkpointing to save memory
+    os.environ['PYTORCH_ENABLE_GRAD_CHECKPOINT'] = '1'
+    
+    # Use memory efficient attention
+    os.environ['PYTORCH_ATTENTION_IMPLEMENTATION'] = 'mem_efficient'
+    
     # Initialize models
     generator = AuroraGenerator().to(device)
     discriminator = AuroraDiscriminator().to(device)
+    
+    # Memory check after model initialization
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+        initial_memory = torch.cuda.memory_allocated() / 1e9
+        print(f"Memory after model initialization: {initial_memory:.2f} GB")
     
     # Enable gradient checkpointing to save memory
     if checkpoint_activation and hasattr(generator, 'enable_checkpointing'):
@@ -1555,7 +1574,6 @@ def progressive_train_aurora_gan(
     # Initialize optimizers
     weight_decay = 0.01
     # Build optimizer only on phase-1 blocks ([4,8])
-
     optimizer_g = create_optimizer_for_active_blocks(
         generator, 
         progressive_schedule[0][0],  # First phase's resolutions
@@ -1565,11 +1583,10 @@ def progressive_train_aurora_gan(
     )
     optimizer_d = torch.optim.AdamW(discriminator.parameters(), lr=lr, betas=(beta1, beta2), weight_decay=weight_decay)
     
-  
     # Initialize AMP scaler for mixed precision training
     scaler = torch.cuda.amp.GradScaler() if use_amp and torch.cuda.is_available() else None
     
-      # Create schedulers for both optimizers
+    # Create schedulers for both optimizers
     lr_scheduler_g = CosineAnnealingLR(
         optimizer_g,
         T_max=num_epochs - kl_annealing_epochs,  # Exclude warmup epochs
@@ -1581,20 +1598,19 @@ def progressive_train_aurora_gan(
         eta_min=lr * 0.05
     )
     
-    
     # Initialize loss function
     gan_loss = AuroraGANLoss(device)
     
     # Calculate epochs for each phase based on fractions
     total_epochs_processed = 0
     num_phases = len(progressive_schedule)
-    phase_epochs = [0] * num_phases # Initialize with zeros
+    phase_epochs = [0] * num_phases  # Initialize with zeros
 
     ideal_epochs_float = [num_epochs * fraction for _, fraction in progressive_schedule]
 
     # Assign the integer part first
     for i in range(num_phases):
-        phase_epochs[i] = int(ideal_epochs_float[i]) # Use floor (int())
+        phase_epochs[i] = int(ideal_epochs_float[i])  # Use floor (int())
 
     # Calculate remaining epochs
     remaining_epochs = num_epochs - sum(phase_epochs)
@@ -1608,31 +1624,53 @@ def progressive_train_aurora_gan(
 
     # Distribute remainder to phases with largest fractions first
     for i in range(remaining_epochs):
-        phase_index_to_increment = indices_sorted_by_fraction[i % num_phases] # Cycle through if remainder > num_phases (shouldn't happen if fractions sum to ~1)
+        phase_index_to_increment = indices_sorted_by_fraction[i % num_phases]
         phase_epochs[phase_index_to_increment] += 1
 
-    # Ensure minimum of 1 epoch per phase (optional, but good practice)
+    # Ensure minimum of 1 epoch per phase
     for i in range(num_phases):
         if phase_epochs[i] == 0:
-             # This logic might need refinement if a phase gets 0 and needs epochs borrowed from others
-             # For simplicity, let's assume fractions are reasonable and this won't make the total exceed num_epochs significantly
-             logger.warning(f"Phase {i} calculated 0 epochs, setting to 1. Total epochs might exceed {num_epochs}.")
-             phase_epochs[i] = 1
-             # If strict adherence to num_epochs is needed, you'd need to decrement
-             # another phase, e.g., the longest one.
+            logger.warning(f"Phase {i} calculated 0 epochs, setting to 1.")
+            phase_epochs[i] = 1
 
-    # Final check (optional, for debugging)
+    # Final check
     if sum(phase_epochs) != num_epochs:
-         logger.warning(f"Calculated phase epochs {phase_epochs} sum to {sum(phase_epochs)}, expected {num_epochs}. Adjusting last phase.")
-         # Fallback adjustment if the above logic still fails (e.g., due to min epoch enforcement)
-         diff = num_epochs - sum(phase_epochs)
-         phase_epochs[-1] += diff
+        logger.warning(f"Calculated phase epochs {phase_epochs} sum to {sum(phase_epochs)}, expected {num_epochs}. Adjusting last phase.")
+        diff = num_epochs - sum(phase_epochs)
+        phase_epochs[-1] += diff
 
-    print(f"Calculated phase epochs: {phase_epochs}") # Log the result
+    print(f"Calculated phase epochs: {phase_epochs}")  # Log the result
     
     # Training loop with progressive phases
     step = 0
+    
+    # Initialize counters for OOM tracking
+    total_oom_count = 0
+    consecutive_oom_count = 0
+    
+    # Initialize dynamic batch size adjustment
+    current_effective_batch_size = dataloader.batch_size
+    current_accumulation_steps = gradient_accumulation_steps
+    
     for phase_idx, (active_resolutions, _) in enumerate(progressive_schedule):
+        # Aggressive memory cleanup before starting phase
+        torch.cuda.empty_cache()
+        gc.collect()
+        
+        if torch.cuda.is_available():
+            # Reset and log memory stats at start of phase
+            torch.cuda.reset_peak_memory_stats()
+            print(f"Memory at phase {phase_idx+1} start: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
+            
+            # Log total, free and reserved GPU memory
+            if hasattr(torch.cuda, 'get_device_properties'):
+                prop = torch.cuda.get_device_properties(device)
+                total_mem = prop.total_memory / 1e9
+                reserved_mem = torch.cuda.memory_reserved() / 1e9
+                allocated_mem = torch.cuda.memory_allocated() / 1e9
+                free_mem = total_mem - reserved_mem
+                print(f"GPU memory status: Total: {total_mem:.2f} GB, Reserved: {reserved_mem:.2f} GB, "
+                      f"Allocated: {allocated_mem:.2f} GB, Free: {free_mem:.2f} GB")
         
         phase_start_epoch = total_epochs_processed
         phase_end_epoch = phase_start_epoch + phase_epochs[phase_idx]
@@ -1645,9 +1683,6 @@ def progressive_train_aurora_gan(
         # Set active resolutions for this phase
         generator.set_active_resolutions(active_resolutions)
         
-        torch.cuda.empty_cache()
-        gc.collect()
-        print(f"Memory cleared at start of phase {phase_idx+1}")
         # Reset optimizer state for newly activated blocks
         if phase_idx > 0:  # Skip for first phase
             print(f"\nReinitializing optimizer for phase {phase_idx+1} with resolutions {active_resolutions}")
@@ -1655,6 +1690,18 @@ def progressive_train_aurora_gan(
             # Aggressive memory cleanup before creating new optimizer
             torch.cuda.empty_cache()
             gc.collect()
+            
+            # Explicitly delete old optimizer and scheduler to free memory
+            del optimizer_g
+            del lr_scheduler_g
+            
+            # Force garbage collection
+            gc.collect()
+            torch.cuda.empty_cache()
+            
+            # Memory check before creating new optimizer
+            if torch.cuda.is_available():
+                print(f"Memory before optimizer creation: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
             
             # Create new optimizer with only active parameters
             optimizer_g = create_optimizer_for_active_blocks(
@@ -1664,9 +1711,11 @@ def progressive_train_aurora_gan(
                 betas=(beta1, beta2), 
                 weight_decay=weight_decay
             )
+            
+            # Memory check after creating optimizer
             if torch.cuda.is_available():
+                print(f"Memory after optimizer creation: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
                 torch.cuda.reset_peak_memory_stats()
-                print(f"Peak memory stats reset after optimizer recreation")
             
             # Create new scheduler for the optimizer
             lr_scheduler_g = CosineAnnealingLR(
@@ -1675,12 +1724,31 @@ def progressive_train_aurora_gan(
                 eta_min=lr * 0.05
             )
             
+            # Report memory and parameter stats
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
+            
             print(f"New optimizer created with {sum(p.numel() for p in optimizer_g.param_groups[0]['params'])} parameters")
-
-
+        
+        # Reset batch size adjustments for new phase if needed
+        if total_oom_count > 10 and phase_idx > 0:
+            # Reduce effective batch size if we've seen too many OOMs
+            old_accumulation = current_accumulation_steps
+            current_accumulation_steps = min(current_accumulation_steps * 2, 64)  # Double steps, max 64
+            print(f"⚠️ Adjusting gradient accumulation steps from {old_accumulation} to {current_accumulation_steps} due to memory pressure")
+            total_oom_count = 0  # Reset counter
         
         # Train for this phase
         for epoch in range(phase_start_epoch, phase_end_epoch):
+            # Clear memory at start of epoch
+            torch.cuda.empty_cache()
+            gc.collect()
+            
+            if torch.cuda.is_available():
+                # Reset and log memory stats at start of epoch
+                torch.cuda.reset_peak_memory_stats()
+                print(f"Memory at epoch {epoch+1} start: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
+            
             print(f"Starting epoch {epoch+1}/{num_epochs}")
             
             # Calculate annealing factors specific to phase
@@ -1690,7 +1758,7 @@ def progressive_train_aurora_gan(
             
             # Calculate annealing factors specific to phase
             temperature_factor = max(1.0, 3.0 - phase_epoch * (2.0 / max(1, phase_epochs_total))) 
-            # Cosine KL annealing with phase awareness
+            
             # Enhanced KL annealing with phase awareness
             if phase_idx == 0:  
                 # First phase - standard linear warmup but over more epochs
@@ -1706,16 +1774,17 @@ def progressive_train_aurora_gan(
                 )
 
             effective_kl_weight = kl_weight * kl_warmup_factor
+            
             # Add debug logging
             print(f"  Global progress: {global_progress:.2f}, Phase progress: {phase_epoch}/{phase_epochs_total}")
             print(f"  KL warmup factor: {kl_warmup_factor:.3f}")
-            
             print(f"  Phase {phase_idx+1} Epoch {phase_epoch+1}/{phase_epochs_total}")
             print(f"  Temperature factor: {temperature_factor:.2f}")
             print(f"  Effective KL weight: {effective_kl_weight:.8f}")
+            print(f"  Gradient accumulation steps: {current_accumulation_steps}")
             
             # Adjust learning rates during the early epochs of a new phase
-            if phase_idx > 0:  # First 5 epochs of phases after the first
+            if phase_idx > 0 and phase_epoch < 5:  # First 5 epochs of phases after the first
                 warmup_factor = (phase_epoch + 1) / 5  # Gradual increase from 20% to 100%
                 
                 # Find param groups for newly added blocks
@@ -1727,14 +1796,8 @@ def progressive_train_aurora_gan(
                         optimizer_g.param_groups[group_idx]['lr'] = current_lr * 0.9 + target_lr * 0.1
                         
                         print(f"  Warming up LR for new blocks: {optimizer_g.param_groups[group_idx]['lr']:.6f}")
-
-                    
             
-            # ==== TRAINING EPOCH LOOP - From original train_aurora_gan ====
-            
-            
-            epoch_pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{num_epochs}")
-            
+            # Initialize epoch metrics
             running_d_loss = 0.0
             running_g_loss = 0.0
             running_r1_loss = 0.0
@@ -1746,19 +1809,67 @@ def progressive_train_aurora_gan(
             # Reset gradients at start of epoch
             optimizer_d.zero_grad()
             optimizer_g.zero_grad()
-
+            
+            # Create progress bar
+            epoch_pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{num_epochs}")
+            
+            # Reset batch counters for memory monitoring
+            batch_count = 0
+            memory_warning_count = 0
+            epoch_oom_count = 0
+            
+            # Periodic memory cleanup interval
+            memory_cleanup_interval = 10  # Check every 10 batches
+            
             for batch_idx, (real_images, text_embeddings) in enumerate(epoch_pbar):
                 batch_size = real_images.size(0)
+                batch_count += 1
                 
-                # Check memory limit if specified
+                # Periodic memory monitoring and cleanup
+                if batch_count % memory_cleanup_interval == 0 and torch.cuda.is_available():
+                    current_mem = torch.cuda.memory_allocated() / 1e9
+                    peak_mem = torch.cuda.max_memory_allocated() / 1e9
+                    print(f"Batch {batch_idx} memory: {current_mem:.2f} GB, Peak: {peak_mem:.2f} GB")
+                    
+                    # Check if we're approaching memory limit (80% of limit)
+                    if peak_mem > batch_memory_limit * 0.8:
+                        print("⚠️ Approaching memory limit, forcing cleanup")
+                        # Force cleanup
+                        torch.cuda.empty_cache()
+                        gc.collect()
+                
+                # Check memory limit
                 if batch_memory_limit and torch.cuda.is_available():
                     current_memory = torch.cuda.memory_allocated() / 1e9  # Convert to GB
                     if current_memory > batch_memory_limit:
-                        logger.warning(f"Memory limit exceeded: {current_memory:.2f}GB > {batch_memory_limit}GB")
+                        memory_warning_count += 1
+                        epoch_oom_count += 1
+                        total_oom_count += 1
+                        consecutive_oom_count += 1
+                        
+                        logger.warning(f"Memory limit exceeded: {current_memory:.2f}GB > {batch_memory_limit}GB "
+                                       f"(warning #{memory_warning_count}, consecutive #{consecutive_oom_count})")
                         logger.warning("Skipping batch to prevent OOM error")
+                        
+                        # Aggressive cleanup
                         torch.cuda.empty_cache()
+                        gc.collect()
+                        
+                        # If we've had too many consecutive memory warnings, reduce batch size dynamically
+                        if consecutive_oom_count >= 3:
+                            old_steps = current_accumulation_steps
+                            current_accumulation_steps = min(current_accumulation_steps * 2, 64)  # Double steps, max 64
+                            logger.warning(f"Multiple consecutive OOM warnings! Increasing gradient accumulation "
+                                          f"from {old_steps} to {current_accumulation_steps}.")
+                            consecutive_oom_count = 0  # Reset counter
+                        
                         continue
-
+                    else:
+                        # Reset consecutive counter when we have a successful batch
+                        consecutive_oom_count = 0
+                
+                # We made it past memory check, proceed with training
+                
                 # Move data to device
                 real_images = real_images.to(device)
                 text_embeddings = text_embeddings.to(device)
@@ -1769,11 +1880,10 @@ def progressive_train_aurora_gan(
                 # ------------------------
                 # Train Discriminator
                 # ------------------------
-                # We don't need to zero gradients every step with gradient accumulation
-                if batch_idx % gradient_accumulation_steps == 0:
+                # Zero gradients based on current accumulation steps
+                if batch_idx % current_accumulation_steps == 0:
                     optimizer_d.zero_grad()
 
-                # --- Real images (Matching) ---
                 # Enable gradient computation for R1 penalty
                 real_images.requires_grad = True
                 
@@ -1785,12 +1895,11 @@ def progressive_train_aurora_gan(
                         outputs=real_pred.sum(), inputs=real_images, create_graph=True
                     )
                     grad_penalty = grad_real.view(grad_real.size(0), -1).norm(2, dim=1) ** 2
-                    r1_loss = (r1_gamma / 2) * grad_penalty.mean() # Divide gamma by 2, common practice
+                    r1_loss = (r1_gamma / 2) * grad_penalty.mean()  # Divide gamma by 2, common practice
 
                     # --- Fake images ---
                     with torch.no_grad():
                         # Request intermediate output for multi-level CLIP later
-                        # Note: generator returns final_image, intermediate_image, kl_loss, routing_probs
                         fake_images_64, fake_images_32, _, _ = generator(
                             z, 
                             text_embeddings, 
@@ -1798,29 +1907,32 @@ def progressive_train_aurora_gan(
                             return_routing=True,
                             annealing_factor=temperature_factor  # Pass temperature factor
                         )
-                    fake_pred = discriminator(fake_images_64.detach(), text_embeddings) # Use final fake image
+                    fake_pred = discriminator(fake_images_64.detach(), text_embeddings)  # Use final fake image
 
                     # --- Mismatched real images/text ---
-                    # Simple shuffle within the batch for mismatching
                     shuffled_indices = torch.randperm(batch_size)
                     mismatched_text_embeddings = text_embeddings[shuffled_indices]
-                    mismatched_pred = discriminator(real_images.detach(), mismatched_text_embeddings) # Use detached real images
+                    mismatched_pred = discriminator(real_images.detach(), mismatched_text_embeddings)  # Use detached real images
 
                     # --- Discriminator loss (includes matching-aware) ---
-                    # Loss now includes real, fake, and mismatched terms
                     d_loss_gan = gan_loss.discriminator_loss(real_pred, fake_pred, mismatched_pred)
 
                     # Total Discriminator Loss
                     d_loss = d_loss_gan + r1_loss
                 
+                # Check for NaN/Inf in discriminator loss
+                if torch.isnan(d_loss).item() or torch.isinf(d_loss).item():
+                    print(f"⚠️ NaN/Inf detected in discriminator loss! Skipping this batch.")
+                    continue
+                
                 # Scale the loss if using AMP
                 if scaler:
-                    scaler.scale(d_loss / gradient_accumulation_steps).backward()
+                    scaler.scale(d_loss / current_accumulation_steps).backward()
                 else:
-                    (d_loss / gradient_accumulation_steps).backward()
+                    (d_loss / current_accumulation_steps).backward()
                 
                 # Only step optimizer after accumulating gradients
-                if (batch_idx + 1) % gradient_accumulation_steps == 0 or (batch_idx + 1) == len(dataloader):
+                if (batch_idx + 1) % current_accumulation_steps == 0 or (batch_idx + 1) == len(dataloader):
                     if scaler:
                         # Clip before scaler step
                         scaler.unscale_(optimizer_d)
@@ -1830,11 +1942,19 @@ def progressive_train_aurora_gan(
                     else:
                         torch.nn.utils.clip_grad_norm_(discriminator.parameters(), max_norm=0.8)
                         optimizer_d.step()
+                    
+                    # Clear discriminator part of computation graph from memory
+                    del grad_real, grad_penalty, real_pred, fake_pred, mismatched_pred
+                    
+                    # Periodic memory check after discriminator step
+                    if torch.cuda.is_available() and batch_idx % (current_accumulation_steps * 5) == 0:
+                        current_mem = torch.cuda.memory_allocated() / 1e9
+                        print(f"Memory after D step: {current_mem:.2f} GB")
 
                 # ------------------------
                 # Train Generator
                 # ------------------------
-                if batch_idx % gradient_accumulation_steps == 0:
+                if batch_idx % current_accumulation_steps == 0:
                     optimizer_g.zero_grad()
 
                 with torch.cuda.amp.autocast() if use_amp else nullcontext():
@@ -1850,29 +1970,26 @@ def progressive_train_aurora_gan(
                     # Apply safe handling to KL loss
                     if kl_loss is not None:
                         # Detect and prevent extreme KL values
-                        # Check for NaN/Inf first using .item()
-                        if torch.isnan(kl_loss).item() or torch.isinf(kl_loss).item(): # Add .item()
+                        if torch.isnan(kl_loss).item() or torch.isinf(kl_loss).item():
                             print(f"⚠️ NaN/Inf detected in KL loss! Replacing with zero.")
                             # Ensure kl_loss requires grad if it's part of the computation graph before replacement
                             original_requires_grad = kl_loss.requires_grad
                             kl_loss = torch.tensor(0.0, device=device, requires_grad=original_requires_grad)
-                        # Check magnitude using .item()
-                        elif (kl_loss > 70.0).item(): # Add .item()
+                        elif (kl_loss > 70.0).item():
                             print(f"⚠️ Extremely high KL detected: {kl_loss.item():.2f}, clamping to 70.0")
                             # Ensure kl_loss requires grad if it's part of the computation graph before replacement
                             original_requires_grad = kl_loss.requires_grad
                             kl_loss = torch.tensor(70.0, device=device, requires_grad=original_requires_grad)
-
                             
                     # Discriminator prediction on fake images (use final resolution)
-                    fake_pred_g = discriminator(fake_images_64, text_embeddings) # Use G's output directly
+                    fake_pred_g = discriminator(fake_images_64, text_embeddings)  # Use G's output directly
 
                     # --- Generator Adversarial Loss ---
                     g_loss_gan = gan_loss.generator_loss(fake_pred_g)
 
                     # --- Multi-level CLIP Loss ---
                     clip_loss_64 = gan_loss.compute_clip_loss(fake_images_64, text_embeddings)
-                    clip_loss_32 = gan_loss.compute_clip_loss(fake_images_32, text_embeddings) # CLIP loss on 32x32
+                    clip_loss_32 = gan_loss.compute_clip_loss(fake_images_32, text_embeddings)  # CLIP loss on 32x32
                     g_loss_clip = (clip_weight_64 * clip_loss_64) + (clip_weight_32 * clip_loss_32)
 
                     # --- MoE Balance Loss ---
@@ -1880,24 +1997,26 @@ def progressive_train_aurora_gan(
 
                     # --- Total Generator Loss ---
                     g_loss = g_loss_gan + g_loss_clip + balance_loss
+                    
+                    # Check for NaN/Inf in generator loss
                     if torch.isnan(g_loss).item() or torch.isinf(g_loss).item():
-                        print("⚠️ NaN or Inf detected in generator loss! Resetting Gradient.")
+                        print("⚠️ NaN or Inf detected in generator loss! Resetting to zero.")
                         original_requires_grad = g_loss.requires_grad
-                        g_loss = torch.tensor(0.0, device=device, requires_grad=original_requires_grad)  # Reset to zero to avoid NaN/Inf propagation      
-                    # Add KL loss separately to avoid tensor in boolean context
+                        g_loss = torch.tensor(0.0, device=device, requires_grad=original_requires_grad)
+                    
+                    # Add KL loss separately
                     if kl_loss is not None:
-                        # Use item() if it's a scalar tensor or torch.is_tensor(kl_loss) to check
                         kl_component = effective_kl_weight * kl_loss
                         g_loss = g_loss + kl_component
                 
                 # Scale the loss if using AMP
                 if scaler:
-                    scaler.scale(g_loss / gradient_accumulation_steps).backward()
+                    scaler.scale(g_loss / current_accumulation_steps).backward()
                 else:
-                    (g_loss / gradient_accumulation_steps).backward()
+                    (g_loss / current_accumulation_steps).backward()
                 
                 # Only step optimizer after accumulating gradients
-                if (batch_idx + 1) % gradient_accumulation_steps == 0 or (batch_idx + 1) == len(dataloader):
+                if (batch_idx + 1) % current_accumulation_steps == 0 or (batch_idx + 1) == len(dataloader):
                     if scaler:
                         # Clip before scaler step
                         scaler.unscale_(optimizer_g)
@@ -1907,11 +2026,25 @@ def progressive_train_aurora_gan(
                     else:
                         torch.nn.utils.clip_grad_norm_(generator.parameters(), max_norm=0.8)
                         optimizer_g.step()
+                    
+                    # Periodic memory check and cleanup after generator step
+                    if torch.cuda.is_available() and batch_idx % (current_accumulation_steps * 5) == 0:
+                        peak_mem = torch.cuda.max_memory_allocated() / 1e9
+                        current_mem = torch.cuda.memory_allocated() / 1e9
+                        print(f"Memory after G step: {current_mem:.2f} GB, Peak: {peak_mem:.2f} GB")
+                        
+                        if peak_mem > batch_memory_limit * 0.8:  # Over 80% of limit
+                            print(f"⚠️ High memory usage detected: {peak_mem:.2f} GB")
+                            # Force cleanup
+                            torch.cuda.empty_cache()
+                            gc.collect()
+                            # Reset peak stats after cleanup
+                            torch.cuda.reset_peak_memory_stats()
 
                 # Update running losses for progress bar
-                running_d_loss = 0.9 * running_d_loss + 0.1 * d_loss_gan.item() # Track gan part of D loss
+                running_d_loss = 0.9 * running_d_loss + 0.1 * d_loss_gan.item()  # Track gan part of D loss
                 running_r1_loss = 0.9 * running_r1_loss + 0.1 * r1_loss.item()
-                running_g_loss = 0.9 * running_g_loss + 0.1 * g_loss_gan.item() # Track gan part of G loss
+                running_g_loss = 0.9 * running_g_loss + 0.1 * g_loss_gan.item()  # Track gan part of G loss
                 running_kl_loss = 0.9 * running_kl_loss + 0.1 * kl_loss.item() if kl_loss is not None else running_kl_loss
                 running_balance_loss = 0.9 * running_balance_loss + 0.1 * balance_loss.item()
                 running_clip_loss_64 = 0.9 * running_clip_loss_64 + 0.1 * clip_loss_64.item()
@@ -1928,35 +2061,44 @@ def progressive_train_aurora_gan(
                     'Clip32': f'{running_clip_loss_32:.3f}',
                 })
 
+                # Clean up batch-specific tensors
+                del real_images, text_embeddings, z
+                del fake_images_64, fake_images_32, routing_probs
+                if 'grad_real' in locals(): del grad_real
+                if 'fake_pred_g' in locals(): del fake_pred_g
+
                 # Logging
                 if step % log_interval == 0:
                     logger.info(f"\nStep [{step}] Epoch [{epoch+1}] Batch [{batch_idx}/{len(dataloader)}] "
                           f"D_loss: {d_loss.item():.4f} (GAN: {d_loss_gan.item():.4f}, R1: {r1_loss.item():.4f}), "
                           f"G_loss: {g_loss.item():.4f} (GAN: {g_loss_gan.item():.4f}, Clip64: {clip_loss_64.item():.4f}, "
-                          f"Clip32: {clip_loss_32.item():.4f}, KL: {kl_loss.item():.4f}, Balance: {balance_loss.item():.4f})")
+                          f"Clip32: {clip_loss_32.item():.4f}, KL: {kl_loss.item() if kl_loss is not None else 0:.4f}, "
+                          f"Balance: {balance_loss.item():.4f})")
+                    
+                    if torch.cuda.is_available():
+                        current_mem = torch.cuda.memory_allocated() / 1e9
+                        peak_mem = torch.cuda.max_memory_allocated() / 1e9
+                        print(f"Current memory: {current_mem:.2f} GB, Peak: {peak_mem:.2f} GB")
 
-                # Save models at step intervals
-                # if step % save_interval == 0 and step > 0:
-                #     # Clean GPU memory before saving to avoid OOM
-                #     torch.cuda.empty_cache()
-                    
-                #     checkpoint_path = os.path.join(save_dir, f"aurora_checkpoint_{step}.pt")
-                #     torch.save({
-                #         'generator': generator.state_dict(),
-                #         'discriminator': discriminator.state_dict(),
-                #         'optimizer_g': optimizer_g.state_dict(),
-                #         'optimizer_d': optimizer_d.state_dict(),
-                #         'epoch': epoch,
-                #         'step': step
-                #     }, checkpoint_path)
-                #     print(f"Checkpoint saved to {checkpoint_path}")
-                    
                 step += 1
 
             # Close the progress bar for this epoch
             epoch_pbar.close()
+            
+            # End of epoch memory cleanup
+            torch.cuda.empty_cache()
+            gc.collect()
+            
+            # Log memory stats at end of epoch
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
+                print(f"Memory after epoch {epoch+1}: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
+                
+            # Report epoch OOM count
+            if epoch_oom_count > 0:
+                print(f"⚠️ Epoch had {epoch_oom_count} OOM warnings")
 
-            # ===== VALIDATION SECTION - From original train_aurora_gan =====
+            # ===== VALIDATION SECTION =====
             if val_dataloader is not None:
                 generator.eval()
                 discriminator.eval()
@@ -1966,6 +2108,10 @@ def progressive_train_aurora_gan(
                 val_clip_loss_64 = 0
                 val_clip_loss_32 = 0
                 val_samples = 0
+                
+                # Memory cleanup before validation
+                torch.cuda.empty_cache()
+                gc.collect()
 
                 print("Running validation...")
                 val_pbar = tqdm(val_dataloader, desc=f"Validation Epoch {epoch+1}")
@@ -1979,8 +2125,13 @@ def progressive_train_aurora_gan(
                         val_text_embeddings = val_text_embeddings.to(device)
                         val_z = torch.randn(val_batch_size, LATENT_DIM, device=device)
 
-                        # Free up some memory before validation step
-                        torch.cuda.empty_cache()
+                        # Memory check before validation step
+                        if torch.cuda.is_available() and batch_memory_limit:
+                            current_memory = torch.cuda.memory_allocated() / 1e9
+                            if current_memory > batch_memory_limit * 0.9:  # 90% of limit
+                                print(f"⚠️ High memory during validation: {current_memory:.2f} GB")
+                                torch.cuda.empty_cache()
+                                gc.collect()
                         
                         # Real images
                         val_real_pred = discriminator(val_real_images, val_text_embeddings)
@@ -2029,8 +2180,17 @@ def progressive_train_aurora_gan(
                             'Clip64': f'{batch_clip_loss_64:.4f}',
                             'Clip32': f'{batch_clip_loss_32:.4f}'
                         })
+                        
+                        # Clean up validation batch tensors
+                        del val_real_images, val_text_embeddings, val_z
+                        del val_fake_images_64, val_fake_images_32
+                        del val_real_pred, val_fake_pred, val_mismatched_pred
 
                 val_pbar.close()
+                
+                # Memory cleanup after validation
+                torch.cuda.empty_cache()
+                gc.collect()
                 
                 # Average losses
                 if val_samples > 0:
@@ -2060,6 +2220,8 @@ def progressive_train_aurora_gan(
 
                 generator.train()
                 discriminator.train()
+                
+                # Step learning rate schedulers after validation
                 if epoch >= kl_annealing_epochs:
                     lr_scheduler_g.step()
                     lr_scheduler_d.step()
@@ -2069,20 +2231,28 @@ def progressive_train_aurora_gan(
                     current_lr_d = lr_scheduler_d.get_last_lr()[0]
                     print(f"  Current learning rates - G: {current_lr_g:.8f}, D: {current_lr_d:.8f}")
 
-            # Save model after each epoch
-            # epoch_save_path = os.path.join(save_dir, f"aurora_checkpoint_epoch_{epoch+1}.pt")
-            # torch.save({
-            #     'generator': generator.state_dict(),
-            #     'discriminator': discriminator.state_dict(),
-            #     'optimizer_g': optimizer_g.state_dict(),
-            #     'optimizer_d': optimizer_d.state_dict(),
-            #     'epoch': epoch + 1,
-            #     'step': step
-            # }, epoch_save_path)
+            # Optional: Save checkpoint at end of epoch
+            # if (epoch + 1) % save_interval == 0:
+            #     epoch_save_path = os.path.join(save_dir, f"aurora_checkpoint_epoch_{epoch+1}.pt")
+            #     torch.save({
+            #         'generator': generator.state_dict(),
+            #         'discriminator': discriminator.state_dict(),
+            #         'optimizer_g': optimizer_g.state_dict(),
+            #         'optimizer_d': optimizer_d.state_dict(),
+            #         'epoch': epoch + 1,
+            #         'step': step,
+            #         'phase': phase_idx
+            #     }, epoch_save_path)
+            #     print(f"Checkpoint saved to {epoch_save_path}")
             
-            # print(f"Checkpoint saved to {epoch_save_path}")
-            
-        # At the end of phase, save a phase checkpoint
+        # At the end of phase, log memory stats and clean up
+        if torch.cuda.is_available():
+            print(f"Phase {phase_idx+1} complete.")
+            print(f"Final phase memory stats:")
+            print(f"  Allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
+            print(f"  Reserved: {torch.cuda.memory_reserved() / 1e9:.2f} GB")
+        
+        # Optional: Save phase checkpoint
         # phase_save_path = os.path.join(save_dir, f"phase_{phase_idx+1}_checkpoint.pt")
         # torch.save({
         #     'generator': generator.state_dict(),
@@ -2097,9 +2267,18 @@ def progressive_train_aurora_gan(
                 
         # Update total epochs processed
         total_epochs_processed = phase_end_epoch
+        
+        # Aggressive memory cleanup between phases
+        torch.cuda.empty_cache()
+        gc.collect()
+        if hasattr(torch, 'cuda') and hasattr(torch.cuda, 'memory_stats'):
+            torch.cuda.reset_peak_memory_stats()
     
-    # Save final model
-    # torch.cuda.empty_cache()
+    # Training complete, final memory cleanup
+    torch.cuda.empty_cache()
+    gc.collect()
+    
+    # Optional: Save final model
     # final_save_path = os.path.join(save_dir, "aurora_final.pt")
     # torch.save({
     #     'generator': generator.state_dict(),
@@ -2109,11 +2288,9 @@ def progressive_train_aurora_gan(
     #     'epoch': num_epochs,
     #     'step': step
     # }, final_save_path)
-    
     # print(f"Final model saved to {final_save_path}")
     
     return generator, discriminator
-
 
 def sample_aurora_gan(generator, text_prompt, num_samples=1, truncation_psi=0.7, device=DEVICE):
     """

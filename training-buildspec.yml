@@ -43,7 +43,7 @@ phases:
         cat > best_hyperparameters.json << EOF
         {
           "balance_weight": "0.01",
-          "batch_size": "11",
+          "batch_size": "8",
           "beta1": "0.5",
           "beta2": "0.999",
           "clip_weight_32": "0.05",
