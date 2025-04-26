@@ -48,14 +48,14 @@ phases:
           "beta2": "0.999",
           "clip_weight_32": "0.05",
           "clip_weight_64": "0.1",
-          "epochs": "150",
-          "kl_annealing_epochs": "100",
+          "epochs": "50",
+          "kl_annealing_epochs": "20",
           "kl_weight": "0.0006752514413805058",
           "learning_rate": "0.00045143030062909416",
           "r1_gamma": "10.771542908988597"
         }
         EOF
-        echo "Using predefined optimal hyperparameters for 150 epochs"
+        echo "Using predefined optimal hyperparameters for 50 epochs"
         cat best_hyperparameters.json
         USING_BEST_PARAMS="true"
         echo "Using optimal hyperparameters: $USING_BEST_PARAMS"

@@ -643,13 +643,15 @@ class GenerativeBlock(nn.Module):
 class AuroraGenerator(nn.Module):
     """
     Aurora GAN Generator with MoE and dynamic routing.
+    Limited to 16x16 resolution - no 32x32 or 64x64.
     """
-    def __init__(self, latent_dim=LATENT_DIM, text_embedding_dim=512):
+    def __init__(self, latent_dim=LATENT_DIM, text_embedding_dim=512, max_resolution=16):
         super(AuroraGenerator, self).__init__()
 
         self.latent_dim = latent_dim
         self.text_embedding_dim = text_embedding_dim
         self._use_checkpointing = False
+        self.max_resolution = max_resolution  # Always 16 in this version
 
         # Text projection (using pre-computed CLIP embeddings)
         self.text_projection = nn.Sequential(
@@ -673,79 +675,15 @@ class AuroraGenerator(nn.Module):
         # Initial generation (4x4 constant)
         self.constant = nn.Parameter(torch.randn(1, 512, 4, 4))
 
-        # Generative blocks with increasing resolution
+        # Generative blocks with increasing resolution - only up to 16x16
         self.gen_block_4 = GenerativeBlock(512, 512, text_dim=text_embedding_dim, upsample=False, resolution=4)
         self.gen_block_8 = GenerativeBlock(512, 256, text_dim=text_embedding_dim, upsample=True, resolution=8)
         self.gen_block_16 = GenerativeBlock(256, 128, text_dim=text_embedding_dim, upsample=True, resolution=16)
-        self.gen_block_32 = GenerativeBlock(128, 64, text_dim=text_embedding_dim, upsample=True, resolution=32)
-        self.gen_block_64 = GenerativeBlock(64, 32, text_dim=text_embedding_dim, upsample=True, resolution=64)
-
-        # To RGB layers for different resolutions
-        self.to_rgb_32 = ModulatedConv(64, 3, kernel_size=1)
-        self.to_rgb_64 = ModulatedConv(32, 3, kernel_size=1)
-        self.active_resolutions = {4, 8, 16, 32, 64}
-        self.original_block_methods = None  # Will store original methods
-    
-    def set_active_resolutions(self, active_resolutions):
-        """
-        Set which resolution blocks are active during training
         
-        Args:
-            active_resolutions: List of resolutions to activate [4, 8, 16, 32, 64]
-        """
-        self.active_resolutions = set(active_resolutions)
-        print(f"Active resolutions set to: {sorted(list(self.active_resolutions))}")
+        # To RGB layers for each resolution
+        self.to_rgb_8 = ModulatedConv(256, 3, kernel_size=1)
+        self.to_rgb_16 = ModulatedConv(128, 3, kernel_size=1)
         
-        # Store original forward methods if not already stored
-        # Initialize original_block_methods if not already done because on first call it will be None
-        if not hasattr(self, 'original_block_methods') or self.original_block_methods is None:
-            self.original_block_methods = {
-                4: self._block_4_fn,
-                8: self._block_8_fn,
-                16: self._block_16_fn,
-                32: self._block_32_fn,
-                64: self._block_64_fn
-            }
-        
-        # Replace methods that should be frozen with no-grad versions
-        for res in [4, 8, 16, 32, 64]:
-            if res in self.active_resolutions:
-                # Use original method
-                if res == 4:
-                    self._block_4_fn = self.original_block_methods[4]
-                elif res == 8:
-                    self._block_8_fn = self.original_block_methods[8]
-                elif res == 16:
-                    self._block_16_fn = self.original_block_methods[16]
-                elif res == 32:
-                    self._block_32_fn = self.original_block_methods[32]
-                elif res == 64:
-                    self._block_64_fn = self.original_block_methods[64]
-            else:
-                # Create frozen version of the method
-                if res == 4:
-                    self._block_4_fn = self._create_frozen_block(4)
-                elif res == 8:
-                    self._block_8_fn = self._create_frozen_block(8)
-                elif res == 16:
-                    self._block_16_fn = self._create_frozen_block(16)
-                elif res == 32:
-                    self._block_32_fn = self._create_frozen_block(32)
-                elif res == 64:
-                    self._block_64_fn = self._create_frozen_block(64)
-
-    def _create_frozen_block(self, resolution):
-        """Create a frozen version of a resolution block that doesn't compute gradients"""
-        original_fn = self.original_block_methods[resolution]
-        
-        def frozen_block_fn(x, w, text_seq, kl_losses, annealing_factor=1.0):
-            with torch.no_grad():
-                return original_fn(x, w, text_seq, kl_losses, annealing_factor)
-        
-        return frozen_block_fn
-
-    
-    
     def enable_checkpointing(self):
         """Enable gradient checkpointing to save memory"""
         self._use_checkpointing = True
@@ -768,65 +706,39 @@ class AuroraGenerator(nn.Module):
             text_embeddings = text_or_embeddings
         return text_embeddings
     
-    def _run_block_with_checkpoint(self, block_fn, resolution, x, w, text_seq, kl_losses, annealing_factor=1.0):
+    def _run_block_with_checkpoint(self, block_fn, x, w, text_seq, kl_losses, annealing_factor=1.0):
         """Run a generative block with optional gradient checkpointing"""
-        should_checkpoint = (
-            self._use_checkpointing and
-            self.training and
-            resolution in self.active_resolutions
-        )
+        should_checkpoint = self._use_checkpointing and self.training
+            
         if should_checkpoint:
-            # Only apply checkpointing if the block is supposed to be trained
             try:
                 # Define a wrapper that matches the original signature expected by checkpoint
                 def _checkpoint_wrapper(_x, _w, _text_seq, _kl_losses, _annealing_factor):
                     output, routing_probs = block_fn(_x, _w, _text_seq, _kl_losses, _annealing_factor)
-                    # Note: kl_losses is modified in-place by attn_block. Checkpoint usually handles this, but returning might be safer.
-                    return output, routing_probs # Return all outputs needed later
+                    return output, routing_probs
 
                 # Run checkpoint with the wrapper
-                # Consider use_reentrant=False for potential memory savings if compatible
                 output, routing_probs = torch.utils.checkpoint.checkpoint(
                     _checkpoint_wrapper,
                     x, w, text_seq, kl_losses, annealing_factor,
-                    use_reentrant=False # Recommended if compatible
+                    use_reentrant=False
                 )
                 return output, routing_probs
 
             except Exception as e:
-                logger.error(f"Checkpointing failed for resolution {resolution}: {e}")
-                logger.error("Falling back to non-checkpointed execution for this block.")
+                logger.error(f"Checkpointing failed: {e}")
+                logger.error("Falling back to non-checkpointed execution")
                 # Fallback to direct execution if checkpointing fails
                 return block_fn(x, w, text_seq, kl_losses, annealing_factor)
         else:
-            # Execute directly if not checkpointing (either disabled, eval mode, or inactive/frozen block)
+            # Execute directly if not checkpointing
             return block_fn(x, w, text_seq, kl_losses, annealing_factor)
-
-    
-    def _block_4_fn(self, x, w, text_seq, kl_losses, annealing_factor=1.0):
-        # Pass annealing_factor to gen_block_4
-        return self.gen_block_4(x, w, text_seq, kl_losses, annealing_factor)
-    
-    def _block_8_fn(self, x, w, text_seq, kl_losses, annealing_factor=1.0):
-        # Pass annealing_factor to gen_block_8
-        return self.gen_block_8(x, w, text_seq, kl_losses, annealing_factor)
-    
-    def _block_16_fn(self, x, w, text_seq, kl_losses, annealing_factor=1.0):
-        # Pass annealing_factor to gen_block_16
-        return self.gen_block_16(x, w, text_seq, kl_losses, annealing_factor)
-    
-    def _block_32_fn(self, x, w, text_seq, kl_losses, annealing_factor=1.0):
-        # Pass annealing_factor to gen_block_32
-        return self.gen_block_32(x, w, text_seq, kl_losses, annealing_factor)
-    
-    def _block_64_fn(self, x, w, text_seq, kl_losses, annealing_factor=1.0):
-        # Pass annealing_factor to gen_block_64
-        return self.gen_block_64(x, w, text_seq, kl_losses, annealing_factor)
     
     def forward(self, z, text_input, truncation_psi=0.7, return_routing=False, 
                 return_intermediate=False, annealing_factor=1.0):
         """
         Forward pass with temperature annealing support for MoE layers.
+        Limited to 16x16 resolution.
         
         Args:
             z: Input noise vector
@@ -836,7 +748,6 @@ class AuroraGenerator(nn.Module):
             return_intermediate: Whether to return intermediate outputs
             annealing_factor: Temperature annealing factor for Bayesian routers
         """
-        # ======== MODIFY FORWARD METHOD ========
         batch_size = z.size(0)
 
         text_embeddings = self.encode_text(text_input)
@@ -870,32 +781,42 @@ class AuroraGenerator(nn.Module):
         x = self.constant.repeat(batch_size, 1, 1, 1)
         
         # Pass annealing_factor to each block (propagate to MoE layers)
-        x, r_probs = self._run_block_with_checkpoint(self._block_4_fn, 4, x, w, text_seq, kl_losses, annealing_factor)
+        x, r_probs = self._run_block_with_checkpoint(
+            lambda x, w, text_seq, kl_losses, annealing_factor: 
+                self.gen_block_4(x, w, text_seq, kl_losses, annealing_factor),
+            x, w, text_seq, kl_losses, annealing_factor
+        )
         routing_probs.append(r_probs)
-        x, r_probs = self._run_block_with_checkpoint(self._block_8_fn, 8, x, w, text_seq, kl_losses, annealing_factor)
+        
+        x, r_probs = self._run_block_with_checkpoint(
+            lambda x, w, text_seq, kl_losses, annealing_factor: 
+                self.gen_block_8(x, w, text_seq, kl_losses, annealing_factor),
+            x, w, text_seq, kl_losses, annealing_factor
+        )
         routing_probs.append(r_probs)
-        x, r_probs = self._run_block_with_checkpoint(self._block_16_fn, 16, x, w, text_seq, kl_losses, annealing_factor)
+        x_8 = self.to_rgb_8(x, w)
+        
+        x, r_probs = self._run_block_with_checkpoint(
+            lambda x, w, text_seq, kl_losses, annealing_factor: 
+                self.gen_block_16(x, w, text_seq, kl_losses, annealing_factor),
+            x, w, text_seq, kl_losses, annealing_factor
+        )
         routing_probs.append(r_probs)
-        x, r_probs = self._run_block_with_checkpoint(self._block_32_fn, 32, x, w, text_seq, kl_losses, annealing_factor)
-        routing_probs.append(r_probs)
-        x_32 = self.to_rgb_32(x, w)
-        x, r_probs = self._run_block_with_checkpoint(self._block_64_fn, 64, x, w, text_seq, kl_losses, annealing_factor)
-        routing_probs.append(r_probs)
-        x_64 = self.to_rgb_64(x, w)
-
-        # Combine outputs from different resolutions
-        x_32_upsampled = F.interpolate(x_32, scale_factor=2, mode='bilinear', align_corners=False)
-        final_image = x_64 + x_32_upsampled
+        x_16 = self.to_rgb_16(x, w)
+        
+        # Final image is at 16x16 resolution
+        final_image = x_16
+        intermediate_image = x_8
 
         # Calculate total KL loss
         kl_loss = sum(kl_losses) if kl_losses else torch.tensor(0.0, device=x.device)
 
         if return_routing and return_intermediate:
-            return final_image, x_32, kl_loss, routing_probs
+            return final_image, intermediate_image, kl_loss, routing_probs
         elif return_routing:
             return final_image, None, kl_loss, routing_probs
         elif return_intermediate:
-            return final_image, x_32, kl_loss
+            return final_image, intermediate_image, kl_loss
         else:
             return final_image, kl_loss
 
@@ -905,62 +826,53 @@ class AuroraDiscriminator(nn.Module):
     """
     Discriminator for Aurora GAN with text conditioning.
     """
-    def __init__(self, text_embedding_dim=512):
+    def __init__(self, text_embedding_dim=512, max_resolution=16):
         super(AuroraDiscriminator, self).__init__()
 
+        self.max_resolution = max_resolution
+        
         # Text projection
         self.text_projection = nn.Sequential(
             nn.Linear(text_embedding_dim, 128),
             nn.LeakyReLU(0.2, inplace=True)
         )
 
-        # Convolutional layers
+        # Convolutional layers for 16x16 resolution only
         self.conv_layers = nn.Sequential(
-            # 64x64 -> 32x32
-            nn.Conv2d(3, 64, kernel_size=4, stride=2, padding=1, bias=False),
-            nn.LeakyReLU(0.2, inplace=True),
-
-            # 32x32 -> 16x16
-            nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1, bias=False),
+            # 16x16 -> 8x8
+            nn.Conv2d(3, 128, kernel_size=4, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(128),
             nn.LeakyReLU(0.2, inplace=True),
 
-            # 16x16 -> 8x8
+            # 8x8 -> 4x4
             nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(256),
             nn.LeakyReLU(0.2, inplace=True),
-
-            # 8x8 -> 4x4
-            nn.Conv2d(256, 512, kernel_size=4, stride=2, padding=1, bias=False),
-            nn.BatchNorm2d(512),
-            nn.LeakyReLU(0.2, inplace=True)
         )
-
+        
         # Output layer
-        # Input channels: 512 (image features) + 128 (text features)
         self.output_layer = nn.Sequential(
-            nn.Conv2d(512 + 128, 1, kernel_size=4, stride=1, padding=0, bias=False),
-            # Removed Sigmoid - typically use raw logits for stability with BCEWithLogitsLoss or softplus
+            nn.Conv2d(256 + 128, 1, kernel_size=4, stride=1, padding=0, bias=False)
         )
 
     def forward(self, img, text_embedding):
         # Process image
-        features = self.conv_layers(img) # Shape: [B, 512, 4, 4]
+        features = self.conv_layers(img)  # Shape: [B, 256, 4, 4]
 
         # Process text embedding
-        text_features = self.text_projection(text_embedding) # Shape: [B, 128]
+        text_features = self.text_projection(text_embedding)  # Shape: [B, 128]
 
         # Replicate text features to match feature map size
-        text_features = text_features.unsqueeze(-1).unsqueeze(-1) # Shape: [B, 128, 1, 1]
-        text_features = text_features.repeat(1, 1, features.shape[2], features.shape[3]) # Shape: [B, 128, 4, 4]
+        text_features = text_features.unsqueeze(-1).unsqueeze(-1)  # Shape: [B, 128, 1, 1]
+        text_features = text_features.repeat(1, 1, features.shape[2], features.shape[3])  # Shape: [B, 128, 4, 4]
 
         # Concatenate image features and text features
-        combined = torch.cat([features, text_features], dim=1) # Shape: [B, 512+128, 4, 4]
+        combined = torch.cat([features, text_features], dim=1)  # Shape: [B, 256+128, 4, 4]
 
         # Final output (logits)
-        output = self.output_layer(combined) # Shape: [B, 1, 1, 1]
+        output = self.output_layer(combined)  # Shape: [B, 1, 1, 1]
 
-        return output.view(-1) # Return logits as a flat tensor [B]
+        return output.view(-1)  # Return logits as a flat tensor [B]
 
 class AuroraGANLoss:
     """
@@ -1087,43 +999,49 @@ def train_aurora_gan(
     dataloader, val_dataloader=None,
     num_epochs=50, lr=0.0002, beta1=0.5, beta2=0.999,
     r1_gamma=10.0,
-    clip_weight_64=0.1,
-    clip_weight_32=0.05,
+    clip_weight_16=0.1,  # Weight for 16x16 resolution
+    clip_weight_8=0.05,  # Weight for 8x8 resolution
     kl_weight=0.001,
-    kl_annealing_epochs=3,
-    balance_weight = 0.01,
+    kl_annealing_epochs=5,
+    lr_warmup_epochs=3,
+    balance_weight=0.01,
     device=DEVICE, save_dir='./aurora_checkpoints',
     log_interval=10, save_interval=1000,
-    metric_callback=None,  # Add metric callback parameter
-    use_amp=True,          # Automatic mixed precision
-    gradient_accumulation_steps=4, # Gradient accumulation for larger effective batch size
-    checkpoint_activation=True,    # Enable gradient checkpointing
-    batch_memory_limit=12.0        # Memory limit per batch in GB
+    metric_callback=None,
+    use_amp=True,
+    gradient_accumulation_steps=8,
+    checkpoint_activation=True,
+    batch_memory_limit=20.0,
+    max_resolution=16        # Fixed at 16x16 resolution
 ):
     """
-    Train the Aurora GAN model with R1, Matching-Aware, Multi-level CLIP loss.
+    Train the Aurora GAN model with R1, Matching-Aware, Multi-level CLIP loss,
+    fixed at 16x16 resolution, for 50 epochs.
     
     Args:
         dataloader: Training data loader
         val_dataloader: Optional validation data loader
-        num_epochs: Number of training epochs
+        num_epochs: Number of training epochs (default 50)
         lr: Learning rate
         beta1: Beta1 for AdamW optimizer
         beta2: Beta2 for AdamW optimizer
         r1_gamma: R1 regularization weight
-        clip_weight_64: CLIP loss weight for 64x64 resolution
-        clip_weight_32: CLIP loss weight for 32x32 resolution
+        clip_weight_16: CLIP loss weight for 16x16 resolution
+        clip_weight_8: CLIP loss weight for 8x8 resolution
         kl_weight: KL divergence loss weight
+        kl_annealing_epochs: Number of epochs for KL annealing
+        lr_warmup_epochs: Number of epochs for learning rate warmup
         balance_weight: MoE balance loss weight
         device: Device to train on
         save_dir: Directory to save checkpoints
         log_interval: How often to log metrics
         save_interval: How often to save checkpoints
-        metric_callback: Optional callback function for reporting metrics for hyperparameter tuning
+        metric_callback: Optional callback function for hyperparameter tuning
         use_amp: Whether to use automatic mixed precision training
-        gradient_accumulation_steps: Number of steps to accumulate gradients before updating weights
-        checkpoint_activation: Whether to use gradient checkpointing to save memory
+        gradient_accumulation_steps: Number of steps to accumulate gradients
+        checkpoint_activation: Whether to use gradient checkpointing
         batch_memory_limit: Maximum GPU memory per batch in GB
+        max_resolution: Fixed at 16x16 resolution
         
     Returns:
         Trained generator and discriminator models
@@ -1131,19 +1049,42 @@ def train_aurora_gan(
     # Create save directory
     os.makedirs(save_dir, exist_ok=True)
 
-    # Initialize models
-    generator = AuroraGenerator().to(device)
-    discriminator = AuroraDiscriminator().to(device)
+    # Memory cleanup before starting
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        gc.collect()
+        print(f"Initial GPU memory: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
+
+    # Initialize models with max_resolution=16
+    print(f"Initializing models with fixed 16x16 resolution")
+    generator = AuroraGenerator(max_resolution=16).to(device)
+    discriminator = AuroraDiscriminator(max_resolution=16).to(device)
     
     # Enable gradient checkpointing to save memory
     if checkpoint_activation and hasattr(generator, 'enable_checkpointing'):
         logger.info("Enabling gradient checkpointing for memory efficiency")
         generator.enable_checkpointing()
     
-    # Initialize optimizers
+    # Initialize optimizers with weight decay
     weight_decay = 0.01
     optimizer_g = torch.optim.AdamW(generator.parameters(), lr=lr, betas=(beta1, beta2), weight_decay=weight_decay)
     optimizer_d = torch.optim.AdamW(discriminator.parameters(), lr=lr, betas=(beta1, beta2), weight_decay=weight_decay)
+
+    # Set up learning rate schedulers with cosine decay
+    from torch.optim.lr_scheduler import CosineAnnealingLR
+    
+    # Create schedulers - will be activated after warmup
+    lr_scheduler_g = CosineAnnealingLR(
+        optimizer_g,
+        T_max=num_epochs - lr_warmup_epochs,  # Exclude warmup epochs
+        eta_min=lr * 0.05  # Minimum LR at 5% of initial
+    )
+    
+    lr_scheduler_d = CosineAnnealingLR(
+        optimizer_d,
+        T_max=num_epochs - lr_warmup_epochs,
+        eta_min=lr * 0.05
+    )
 
     # Initialize AMP scaler for mixed precision training
     scaler = torch.cuda.amp.GradScaler() if use_amp and torch.cuda.is_available() else None
@@ -1151,50 +1092,137 @@ def train_aurora_gan(
     # Initialize loss function
     gan_loss = AuroraGANLoss(device)
 
+    # Log model parameters
+    num_params_g = sum(p.numel() for p in generator.parameters())
+    num_params_d = sum(p.numel() for p in discriminator.parameters())
+    print(f"Generator parameters: {num_params_g:,}")
+    print(f"Discriminator parameters: {num_params_d:,}")
+    print(f"Total parameters: {num_params_g + num_params_d:,}")
+
+    # Memory check after model initialization
+    if torch.cuda.is_available():
+        print(f"Memory after model init: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
+        torch.cuda.reset_peak_memory_stats()
+
+    # Variables for tracking OOM errors
+    total_oom_count = 0
+    consecutive_oom_count = 0
+    current_accumulation_steps = gradient_accumulation_steps
+
     # Training loop
     step = 0
     for epoch in range(num_epochs):
         print(f"\n{'='*20} Epoch {epoch+1}/{num_epochs} {'='*20}")
         
-        # Calculate annealing factors for temperature and KL weight
-        # Start with high temperature (more uniform routing) and low KL weight
-        temperature_factor = max(1.0, 3.0 - epoch * 0.2)  # Starts at 3.0, reduces by 0.2 each epoch 
+        # Calculate LR warmup factor
+        if epoch < lr_warmup_epochs:
+            # Linear warmup from 10% to 100% of base LR
+            warmup_factor = 0.1 + 0.9 * (epoch / lr_warmup_epochs)
+            current_lr_g = lr * warmup_factor
+            current_lr_d = lr * warmup_factor
+            
+            # Update optimizer learning rates
+            for param_group in optimizer_g.param_groups:
+                param_group['lr'] = current_lr_g
+            for param_group in optimizer_d.param_groups:
+                param_group['lr'] = current_lr_d
+                
+            print(f"LR Warmup: {warmup_factor:.2f} - G: {current_lr_g:.6f}, D: {current_lr_d:.6f}")
+        else:
+            # After warmup, use schedulers
+            current_lr_g = optimizer_g.param_groups[0]['lr']
+            current_lr_d = optimizer_d.param_groups[0]['lr']
+            print(f"Scheduled LR - G: {current_lr_g:.6f}, D: {current_lr_d:.6f}")
         
-        # Very slow KL warmup to avoid instability
-        # The first 5 epochs have very small KL weight to establish stable directions
-        kl_warmup_factor = min(1.0, epoch / kl_annealing_epochs)  # Gradual increase over 20 epochs
+        # Calculate KL annealing factor 
+        # Starts very low and increases over kl_annealing_epochs
+        kl_warmup_factor = min(1.0, epoch / kl_annealing_epochs)
         effective_kl_weight = kl_weight * kl_warmup_factor
+        
+        # Calculate MoE router temperature factor
+        # Starts high (more uniform routing) and gradually decreases
+        temperature_factor = max(1.0, 3.0 - epoch * 0.1)
         
         print(f"Epoch {epoch+1} settings:")
         print(f"  Temperature factor: {temperature_factor:.2f}")
         print(f"  KL warmup factor: {kl_warmup_factor:.3f}")
         print(f"  Effective KL weight: {effective_kl_weight:.8f}")
+        print(f"  Gradient accumulation steps: {current_accumulation_steps}")
 
+        # Create progress bar for this epoch
         epoch_pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{num_epochs}")
         
+        # Initialize running losses for this epoch
         running_d_loss = 0.0
         running_g_loss = 0.0
         running_r1_loss = 0.0
         running_kl_loss = 0.0
         running_balance_loss = 0.0
-        running_clip_loss_64 = 0.0
-        running_clip_loss_32 = 0.0
+        running_clip_loss_16 = 0.0
+        running_clip_loss_8 = 0.0
         
         # Reset gradients at start of epoch
         optimizer_d.zero_grad()
         optimizer_g.zero_grad()
+        
+        # Memory cleanup at start of epoch
+        torch.cuda.empty_cache()
+        gc.collect()
+        
+        # Reset batch counters for memory monitoring
+        batch_count = 0
+        memory_warning_count = 0
+        epoch_oom_count = 0
+        
+        # Periodic memory cleanup interval
+        memory_cleanup_interval = 10  # Check every 10 batches
 
         for batch_idx, (real_images, text_embeddings) in enumerate(epoch_pbar):
             batch_size = real_images.size(0)
+            batch_count += 1
+            
+            # Periodic memory monitoring and cleanup
+            if batch_count % memory_cleanup_interval == 0 and torch.cuda.is_available():
+                current_mem = torch.cuda.memory_allocated() / 1e9
+                peak_mem = torch.cuda.max_memory_allocated() / 1e9
+                print(f"Batch {batch_idx} memory: {current_mem:.2f} GB, Peak: {peak_mem:.2f} GB")
+                
+                # Check if we're approaching memory limit (80% of limit)
+                if peak_mem > batch_memory_limit * 0.8:
+                    print("⚠️ Approaching memory limit, forcing cleanup")
+                    # Force cleanup
+                    torch.cuda.empty_cache()
+                    gc.collect()
             
             # Check memory limit if specified
             if batch_memory_limit and torch.cuda.is_available():
                 current_memory = torch.cuda.memory_allocated() / 1e9  # Convert to GB
                 if current_memory > batch_memory_limit:
-                    logger.warning(f"Memory limit exceeded: {current_memory:.2f}GB > {batch_memory_limit}GB")
+                    memory_warning_count += 1
+                    epoch_oom_count += 1
+                    total_oom_count += 1
+                    consecutive_oom_count += 1
+                    
+                    logger.warning(f"Memory limit exceeded: {current_memory:.2f}GB > {batch_memory_limit}GB "
+                                   f"(warning #{memory_warning_count}, consecutive #{consecutive_oom_count})")
                     logger.warning("Skipping batch to prevent OOM error")
+                    
+                    # Aggressive cleanup
                     torch.cuda.empty_cache()
+                    gc.collect()
+                    
+                    # If we've had too many consecutive memory warnings, reduce batch size dynamically
+                    if consecutive_oom_count >= 3:
+                        old_steps = current_accumulation_steps
+                        current_accumulation_steps = min(current_accumulation_steps * 2, 64)  # Double steps, max 64
+                        logger.warning(f"Multiple consecutive OOM warnings! Increasing gradient accumulation "
+                                      f"from {old_steps} to {current_accumulation_steps}.")
+                        consecutive_oom_count = 0  # Reset counter
+                    
                     continue
+                else:
+                    # Reset consecutive counter when we have a successful batch
+                    consecutive_oom_count = 0
 
             # Move data to device
             real_images = real_images.to(device)
@@ -1206,11 +1234,10 @@ def train_aurora_gan(
             # ------------------------
             # Train Discriminator
             # ------------------------
-            # We don't need to zero gradients every step with gradient accumulation
-            if batch_idx % gradient_accumulation_steps == 0:
+            # Zero gradients based on accumulation steps
+            if batch_idx % current_accumulation_steps == 0:
                 optimizer_d.zero_grad()
 
-            # --- Real images (Matching) ---
             # Enable gradient computation for R1 penalty
             real_images.requires_grad = True
             
@@ -1228,8 +1255,14 @@ def train_aurora_gan(
                 with torch.no_grad():
                     # Request intermediate output for multi-level CLIP later
                     # Note: generator returns final_image, intermediate_image, kl_loss, routing_probs
-                    fake_images_64, fake_images_32, _, _ = generator(z, text_embeddings, return_intermediate=True, return_routing=True)
-                fake_pred = discriminator(fake_images_64.detach(), text_embeddings) # Use final fake image
+                    fake_images_16, fake_images_8, _, _ = generator(
+                        z, 
+                        text_embeddings, 
+                        return_intermediate=True, 
+                        return_routing=True,
+                        annealing_factor=temperature_factor  # Pass temperature factor
+                    )
+                fake_pred = discriminator(fake_images_16.detach(), text_embeddings) # Use final fake image (16x16)
 
                 # --- Mismatched real images/text ---
                 # Simple shuffle within the batch for mismatching
@@ -1244,14 +1277,19 @@ def train_aurora_gan(
                 # Total Discriminator Loss
                 d_loss = d_loss_gan + r1_loss
             
+            # Check for NaN/Inf in discriminator loss
+            if torch.isnan(d_loss).item() or torch.isinf(d_loss).item():
+                print(f"⚠️ NaN/Inf detected in discriminator loss! Skipping this batch.")
+                continue
+            
             # Scale the loss if using AMP
             if scaler:
-                scaler.scale(d_loss / gradient_accumulation_steps).backward()
+                scaler.scale(d_loss / current_accumulation_steps).backward()
             else:
-                (d_loss / gradient_accumulation_steps).backward()
+                (d_loss / current_accumulation_steps).backward()
             
             # Only step optimizer after accumulating gradients
-            if (batch_idx + 1) % gradient_accumulation_steps == 0 or (batch_idx + 1) == len(dataloader):
+            if (batch_idx + 1) % current_accumulation_steps == 0 or (batch_idx + 1) == len(dataloader):
                 if scaler:
                     # Clip before scaler step
                     scaler.unscale_(optimizer_d)
@@ -1263,36 +1301,54 @@ def train_aurora_gan(
                 
                 if scaler:
                     scaler.update()
+                
+                # Clear discriminator part of computation graph from memory
+                del grad_real, grad_penalty, real_pred, fake_pred, mismatched_pred
+                
+                # Periodic memory check after discriminator step
+                if torch.cuda.is_available() and batch_idx % (current_accumulation_steps * 5) == 0:
+                    current_mem = torch.cuda.memory_allocated() / 1e9
+                    print(f"Memory after D step: {current_mem:.2f} GB")
 
             # ------------------------
             # Train Generator
             # ------------------------
-            if batch_idx % gradient_accumulation_steps == 0:
+            if batch_idx % current_accumulation_steps == 0:
                 optimizer_g.zero_grad()
 
             with torch.cuda.amp.autocast() if use_amp else nullcontext():
                 # Generate fake images, get intermediate, KL loss, and routing probs
-                fake_images_64, fake_images_32, kl_loss, routing_probs = generator(z, text_embeddings, return_intermediate=True, return_routing=True, annealing_factor=temperature_factor)
+                fake_images_16, fake_images_8, kl_loss, routing_probs = generator(
+                    z, 
+                    text_embeddings, 
+                    return_intermediate=True, 
+                    return_routing=True,
+                    annealing_factor=temperature_factor  # Pass temperature factor
+                )
 
-                # Apply safe handling to KL loss
+                # Apply safe handling to KL loss - keep printing high KL values
                 if kl_loss is not None:
-                    # Detect and prevent extreme KL values
+                    # Print high KL values
+                    if kl_loss > 50.0:
+                        print(f"⚠️ High KL detected: {kl_loss.item():.2f}")
+                    
+                    # Only reset for NaN/Inf
                     if torch.isnan(kl_loss).item() or torch.isinf(kl_loss).item():
                         print(f"⚠️ NaN/Inf detected in KL loss! Replacing with zero.")
-                        kl_loss = torch.tensor(0.0, device=device)
-                    elif kl_loss > 50.0:
-                        print(f"⚠️ Extremely high KL detected: {kl_loss.item():.2f}, clamping to 50.0")
-                        kl_loss = torch.tensor(50.0, device=device)
-                # Discriminator prediction on fake images (use final resolution)
-                fake_pred_g = discriminator(fake_images_64, text_embeddings) # Use G's output directly
+                        # Ensure kl_loss requires grad if it's part of the computation graph before replacement
+                        original_requires_grad = kl_loss.requires_grad
+                        kl_loss = torch.tensor(0.0, device=device, requires_grad=original_requires_grad)
+                            
+                # Discriminator prediction on fake images (16x16 resolution)
+                fake_pred_g = discriminator(fake_images_16, text_embeddings)
 
                 # --- Generator Adversarial Loss ---
                 g_loss_gan = gan_loss.generator_loss(fake_pred_g)
 
                 # --- Multi-level CLIP Loss ---
-                clip_loss_64 = gan_loss.compute_clip_loss(fake_images_64, text_embeddings)
-                clip_loss_32 = gan_loss.compute_clip_loss(fake_images_32, text_embeddings) # CLIP loss on 32x32
-                g_loss_clip = (clip_weight_64 * clip_loss_64) + (clip_weight_32 * clip_loss_32)
+                clip_loss_16 = gan_loss.compute_clip_loss(fake_images_16, text_embeddings)
+                clip_loss_8 = gan_loss.compute_clip_loss(fake_images_8, text_embeddings)
+                g_loss_clip = (clip_weight_16 * clip_loss_16) + (clip_weight_8 * clip_loss_8)
 
                 # --- MoE Balance Loss ---
                 balance_loss = gan_loss.moe_balance_loss(routing_probs, balance_weight=balance_weight)
@@ -1300,21 +1356,25 @@ def train_aurora_gan(
                 # --- Total Generator Loss ---
                 g_loss = g_loss_gan + g_loss_clip + balance_loss
                 
+                # Check for NaN/Inf in generator loss
+                if torch.isnan(g_loss).item() or torch.isinf(g_loss).item():
+                    print("⚠️ NaN or Inf detected in generator loss! Resetting to zero.")
+                    original_requires_grad = g_loss.requires_grad
+                    g_loss = torch.tensor(0.0, device=device, requires_grad=original_requires_grad)
                 
-                # Add KL loss separately to avoid tensor in boolean context
+                # Add KL loss separately - apply effective KL weight with annealing
                 if kl_loss is not None:
-                    # Use item() if it's a scalar tensor or torch.is_tensor(kl_loss) to check
                     kl_component = effective_kl_weight * kl_loss
                     g_loss = g_loss + kl_component
             
             # Scale the loss if using AMP
             if scaler:
-                scaler.scale(g_loss / gradient_accumulation_steps).backward()
+                scaler.scale(g_loss / current_accumulation_steps).backward()
             else:
-                (g_loss / gradient_accumulation_steps).backward()
+                (g_loss / current_accumulation_steps).backward()
             
             # Only step optimizer after accumulating gradients
-            if (batch_idx + 1) % gradient_accumulation_steps == 0 or (batch_idx + 1) == len(dataloader):
+            if (batch_idx + 1) % current_accumulation_steps == 0 or (batch_idx + 1) == len(dataloader):
                 if scaler:
                     # Clip before scaler step
                     scaler.unscale_(optimizer_g)
@@ -1326,15 +1386,29 @@ def train_aurora_gan(
                 
                 if scaler:
                     scaler.update()
+                
+                # Periodic memory check and cleanup after generator step
+                if torch.cuda.is_available() and batch_idx % (current_accumulation_steps * 5) == 0:
+                    peak_mem = torch.cuda.max_memory_allocated() / 1e9
+                    current_mem = torch.cuda.memory_allocated() / 1e9
+                    print(f"Memory after G step: {current_mem:.2f} GB, Peak: {peak_mem:.2f} GB")
+                    
+                    if peak_mem > batch_memory_limit * 0.8:  # Over 80% of limit
+                        print(f"⚠️ High memory usage detected: {peak_mem:.2f} GB")
+                        # Force cleanup
+                        torch.cuda.empty_cache()
+                        gc.collect()
+                        # Reset peak stats after cleanup
+                        torch.cuda.reset_peak_memory_stats()
 
             # Update running losses for progress bar
-            running_d_loss = 0.9 * running_d_loss + 0.1 * d_loss_gan.item() # Track gan part of D loss
+            running_d_loss = 0.9 * running_d_loss + 0.1 * d_loss_gan.item()  # Track GAN part of D loss
             running_r1_loss = 0.9 * running_r1_loss + 0.1 * r1_loss.item()
-            running_g_loss = 0.9 * running_g_loss + 0.1 * g_loss_gan.item() # Track gan part of G loss
+            running_g_loss = 0.9 * running_g_loss + 0.1 * g_loss_gan.item()  # Track GAN part of G loss
             running_kl_loss = 0.9 * running_kl_loss + 0.1 * kl_loss.item() if kl_loss is not None else running_kl_loss
             running_balance_loss = 0.9 * running_balance_loss + 0.1 * balance_loss.item()
-            running_clip_loss_64 = 0.9 * running_clip_loss_64 + 0.1 * clip_loss_64.item()
-            running_clip_loss_32 = 0.9 * running_clip_loss_32 + 0.1 * clip_loss_32.item()
+            running_clip_loss_16 = 0.9 * running_clip_loss_16 + 0.1 * clip_loss_16.item()
+            running_clip_loss_8 = 0.9 * running_clip_loss_8 + 0.1 * clip_loss_8.item()
 
             # Update progress bar description with loss values
             epoch_pbar.set_postfix({
@@ -1343,18 +1417,30 @@ def train_aurora_gan(
                 'G_loss': f'{running_g_loss:.3f}',
                 'KL': f'{running_kl_loss:.4f}',
                 'Balance': f'{running_balance_loss:.4f}',
-                'Clip64': f'{running_clip_loss_64:.3f}',
-                'Clip32': f'{running_clip_loss_32:.3f}',
+                'Clip16': f'{running_clip_loss_16:.3f}',
+                'Clip8': f'{running_clip_loss_8:.3f}',
             })
+
+            # Clean up batch-specific tensors
+            del real_images, text_embeddings, z
+            del fake_images_16, fake_images_8, routing_probs
+            if 'fake_pred_g' in locals(): del fake_pred_g
 
             # Logging
             if step % log_interval == 0:
                 logger.info(f"\nStep [{step}] Epoch [{epoch+1}] Batch [{batch_idx}/{len(dataloader)}] "
                       f"D_loss: {d_loss.item():.4f} (GAN: {d_loss_gan.item():.4f}, R1: {r1_loss.item():.4f}), "
-                      f"G_loss: {g_loss.item():.4f} (GAN: {g_loss_gan.item():.4f}, Clip64: {clip_loss_64.item():.4f}, Clip32: {clip_loss_32.item():.4f}, KL: {kl_loss.item():.4f}, Balance: {balance_loss.item():.4f})")
+                      f"G_loss: {g_loss.item():.4f} (GAN: {g_loss_gan.item():.4f}, Clip16: {clip_loss_16.item():.4f}, "
+                      f"Clip8: {clip_loss_8.item():.4f}, KL: {kl_loss.item() if kl_loss is not None else 0:.4f}, "
+                      f"Balance: {balance_loss.item():.4f})")
+                
+                if torch.cuda.is_available():
+                    current_mem = torch.cuda.memory_allocated() / 1e9
+                    peak_mem = torch.cuda.max_memory_allocated() / 1e9
+                    print(f"Current memory: {current_mem:.2f} GB, Peak: {peak_mem:.2f} GB")
 
-            # Save models
-            # if step % save_interval == 0 and step > 0: # Avoid saving at step 0
+            # Save models at step intervals if specified
+            # if step % save_interval == 0 and step > 0:
             #     # Clean GPU memory before saving to avoid OOM
             #     torch.cuda.empty_cache()
                 
@@ -1368,21 +1454,45 @@ def train_aurora_gan(
             #         'step': step
             #     }, checkpoint_path)
                 
+            #     print(f"Checkpoint saved to {checkpoint_path}")
+                
             step += 1
 
         # Close the progress bar for this epoch
         epoch_pbar.close()
+        
+        # End of epoch memory cleanup
+        torch.cuda.empty_cache()
+        gc.collect()
+        
+        # Log memory stats at end of epoch
+        if torch.cuda.is_available():
+            print(f"Memory after epoch {epoch+1}: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
+            torch.cuda.reset_peak_memory_stats()
+                
+        # Report epoch OOM count
+        if epoch_oom_count > 0:
+            print(f"⚠️ Epoch had {epoch_oom_count} OOM warnings")
+        
+        # Step learning rate schedulers after warmup period
+        if epoch >= lr_warmup_epochs:
+            lr_scheduler_g.step()
+            lr_scheduler_d.step()
 
-        # Validation (if provided)
+        # ===== VALIDATION SECTION =====
         if val_dataloader is not None:
             generator.eval()
             discriminator.eval()
 
             val_g_loss_gan = 0
             val_d_loss_gan = 0
-            val_clip_loss_64 = 0
-            val_clip_loss_32 = 0
+            val_clip_loss_16 = 0
+            val_clip_loss_8 = 0
             val_samples = 0
+            
+            # Memory cleanup before validation
+            torch.cuda.empty_cache()
+            gc.collect()
 
             print("Running validation...")
             val_pbar = tqdm(val_dataloader, desc=f"Validation Epoch {epoch+1}")
@@ -1396,62 +1506,91 @@ def train_aurora_gan(
                     val_text_embeddings = val_text_embeddings.to(device)
                     val_z = torch.randn(val_batch_size, LATENT_DIM, device=device)
 
-                    # Free up some memory before validation step
-                    torch.cuda.empty_cache()
+                    # Memory check before validation step
+                    if torch.cuda.is_available() and batch_memory_limit:
+                        current_memory = torch.cuda.memory_allocated() / 1e9
+                        if current_memory > batch_memory_limit * 0.9:  # 90% of limit
+                            print(f"⚠️ High memory during validation: {current_memory:.2f} GB")
+                            torch.cuda.empty_cache()
+                            gc.collect()
                     
                     # Real images
                     val_real_pred = discriminator(val_real_images, val_text_embeddings)
 
-                    # Fake images - Adjust call based on modified generator forward
-                    # We only need final image and KL for validation loss calculation usually
-                    val_fake_images_64, val_fake_images_32, val_kl_loss = generator(val_z, val_text_embeddings, return_intermediate=True) # Get KL loss
+                    # Fake images - Pass temperature factor
+                    val_fake_images_16, val_fake_images_8, val_kl_loss = generator(
+                        val_z, 
+                        val_text_embeddings, 
+                        return_intermediate=True,
+                        annealing_factor=temperature_factor
+                    )
 
                     # Fake images prediction
-                    val_fake_pred = discriminator(val_fake_images_64, val_text_embeddings)
+                    val_fake_pred = discriminator(val_fake_images_16, val_text_embeddings)
 
-                    # Mismatched prediction (optional but good for consistency)
+                    # Mismatched prediction
                     val_shuffled_indices = torch.randperm(val_batch_size)
                     val_mismatched_text = val_text_embeddings[val_shuffled_indices]
                     val_mismatched_pred = discriminator(val_real_images, val_mismatched_text)
 
                     # Losses
-                    batch_d_loss = gan_loss.discriminator_loss(val_real_pred, val_fake_pred, val_mismatched_pred).item()
-                    batch_g_loss = gan_loss.generator_loss(val_fake_pred, val_kl_loss, kl_weight=kl_weight).item() # Only GAN + KL part for validation G loss
-                    batch_clip_loss_64 = gan_loss.compute_clip_loss(val_fake_images_64, val_text_embeddings).item()
-                    batch_clip_loss_32 = gan_loss.compute_clip_loss(val_fake_images_32, val_text_embeddings).item()
+                    batch_d_loss = gan_loss.discriminator_loss(
+                        val_real_pred, val_fake_pred, val_mismatched_pred
+                    ).item()
+                    
+                    batch_g_loss = gan_loss.generator_loss(
+                        val_fake_pred, val_kl_loss, kl_weight=effective_kl_weight
+                    ).item()
+                    
+                    batch_clip_loss_16 = gan_loss.compute_clip_loss(
+                        val_fake_images_16, val_text_embeddings
+                    ).item()
+                    
+                    batch_clip_loss_8 = gan_loss.compute_clip_loss(
+                        val_fake_images_8, val_text_embeddings
+                    ).item()
 
                     val_d_loss_gan += batch_d_loss * val_batch_size
                     val_g_loss_gan += batch_g_loss * val_batch_size
-                    val_clip_loss_64 += batch_clip_loss_64 * val_batch_size
-                    val_clip_loss_32 += batch_clip_loss_32 * val_batch_size
+                    val_clip_loss_16 += batch_clip_loss_16 * val_batch_size
+                    val_clip_loss_8 += batch_clip_loss_8 * val_batch_size
 
                     val_pbar.set_postfix({
                         'D_loss': f'{batch_d_loss:.4f}',
                         'G_loss': f'{batch_g_loss:.4f}',
-                        'Clip64': f'{batch_clip_loss_64:.4f}',
-                        'Clip32': f'{batch_clip_loss_32:.4f}'
+                        'Clip16': f'{batch_clip_loss_16:.4f}',
+                        'Clip8': f'{batch_clip_loss_8:.4f}'
                     })
+                    
+                    # Clean up validation batch tensors
+                    del val_real_images, val_text_embeddings, val_z
+                    del val_fake_images_16, val_fake_images_8
+                    del val_real_pred, val_fake_pred, val_mismatched_pred
 
             val_pbar.close()
-
+            
+            # Memory cleanup after validation
+            torch.cuda.empty_cache()
+            gc.collect()
+            
             # Average losses
             if val_samples > 0:
                 val_d_loss_gan /= val_samples
                 val_g_loss_gan /= val_samples
-                val_clip_loss_64 /= val_samples
-                val_clip_loss_32 /= val_samples
+                val_clip_loss_16 /= val_samples
+                val_clip_loss_8 /= val_samples
 
                 # Collect metrics for reporting
                 val_metrics = {
                     'val_d_loss': val_d_loss_gan,
                     'val_g_loss': val_g_loss_gan,
-                    'val_clip_loss_64': val_clip_loss_64,
-                    'val_clip_loss_32': val_clip_loss_32,
-                    'val_clip_loss': val_clip_loss_64  # Primary metric for HPO
+                    'val_clip_loss_16': val_clip_loss_16,
+                    'val_clip_loss_8': val_clip_loss_8,
+                    'val_clip_loss': val_clip_loss_16  # Primary metric for hyperparameter tuning
                 }
 
                 print(f"Validation Results - D_loss: {val_d_loss_gan:.4f}, G_loss: {val_g_loss_gan:.4f}, "
-                     f"Clip_Loss_64: {val_clip_loss_64:.4f}, Clip_Loss_32: {val_clip_loss_32:.4f}")
+                     f"Clip_Loss_16: {val_clip_loss_16:.4f}, Clip_Loss_8: {val_clip_loss_8:.4f}")
                 
                 # Call the metric callback if provided
                 if metric_callback:
@@ -1463,10 +1602,7 @@ def train_aurora_gan(
             generator.train()
             discriminator.train()
 
-        # Save model after each epoch
-        # Clean GPU memory first
-        # torch.cuda.empty_cache()
-        
+        # Save checkpoint at the end of each epoch
         # epoch_save_path = os.path.join(save_dir, f"aurora_checkpoint_epoch_{epoch+1}.pt")
         # torch.save({
         #     'generator': generator.state_dict(),
@@ -1477,820 +1613,25 @@ def train_aurora_gan(
         #     'step': step
         # }, epoch_save_path)
         
-        # print(f"Checkpoint saved to {epoch_save_path}")
-
-    # Save final models
-    # Clean GPU memory first
-    torch.cuda.empty_cache()
+        # print(f"Epoch {epoch+1} checkpoint saved to {epoch_save_path}")
     
-    # final_save_path = os.path.join(save_dir, "aurora_final.pt")
-    # torch.save({
-    #     'generator': generator.state_dict(),
-    #     'discriminator': discriminator.state_dict(),
-    #     'optimizer_g': optimizer_g.state_dict(),
-    #     'optimizer_d': optimizer_d.state_dict(),
-    #     'epoch': num_epochs,
-    #     'step': step
-    # }, final_save_path)
-    
-    # print(f"Final model saved to {final_save_path}")
-
-    return generator, discriminator
-
-
-def progressive_train_aurora_gan(
-    dataloader, val_dataloader=None,
-    num_epochs=50, lr=0.0002, beta1=0.5, beta2=0.999,
-    r1_gamma=10.0,
-    clip_weight_64=0.1,
-    clip_weight_32=0.05,
-    kl_weight=0.001,
-    kl_annealing_epochs=3,
-    balance_weight=0.01,
-    device=DEVICE, save_dir='./aurora_checkpoints',
-    log_interval=10, save_interval=1000,
-    metric_callback=None,
-    use_amp=True,
-    gradient_accumulation_steps=8,
-    checkpoint_activation=True,
-    batch_memory_limit=10.0,
-    # Progressive training parameters
-    progressive_schedule=None
-):
-    """
-    Train the Aurora GAN with progressive resolution increases.
-    
-    Args:
-        progressive_schedule: List of (resolution_list, epoch_fraction) tuples
-            Example: [
-                ([4, 8], 0.3),         # Train 4×4 and 8×8 for 30% of epochs
-                ([4, 8, 16], 0.2),     # Add 16×16 for next 20%
-                ([4, 8, 16, 32], 0.25), # Add 32×32 for next 25%
-                ([4, 8, 16, 32, 64], 0.25) # Full model for final 25%
-            ]
-        
-        Other parameters: Same as train_aurora_gan
-    """
-    # Use default progressive schedule if not provided
-    if progressive_schedule is None:
-        progressive_schedule = [
-            ([4, 8], 0.20),            # First 20% epochs: train 4x4 and 8x8 only
-            ([4, 8, 16], 0.25),        # Next 25% epochs: add 16x16
-            ([4, 8, 16, 32], 0.30),    # Next 30% epochs: add 32x32
-            ([4, 8, 16, 32, 64], 0.25) # Final 25% epochs: full 64x64 model
-        ]
-    
-    # Create save directory
-    os.makedirs(save_dir, exist_ok=True)
-
-    # Set memory optimization settings
-    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128,garbage_collection_threshold:0.6"
-    torch.backends.cuda.matmul.allow_tf32 = True  # Enable TF32 
-    torch.backends.cudnn.allow_tf32 = True  # Enable TF32 for cuDNN
-    torch.backends.cudnn.benchmark = False
-    torch.backends.cudnn.deterministic = True
-    
-    # Enable gradient checkpointing to save memory
-    os.environ['PYTORCH_ENABLE_GRAD_CHECKPOINT'] = '1'
-    
-    # Use memory efficient attention
-    os.environ['PYTORCH_ATTENTION_IMPLEMENTATION'] = 'mem_efficient'
-    
-    # Initialize models
-    generator = AuroraGenerator().to(device)
-    discriminator = AuroraDiscriminator().to(device)
-    
-    # Memory check after model initialization
-    if torch.cuda.is_available():
-        torch.cuda.reset_peak_memory_stats()
-        initial_memory = torch.cuda.memory_allocated() / 1e9
-        print(f"Memory after model initialization: {initial_memory:.2f} GB")
-    
-    # Enable gradient checkpointing to save memory
-    if checkpoint_activation and hasattr(generator, 'enable_checkpointing'):
-        logger.info("Enabling gradient checkpointing for memory efficiency")
-        generator.enable_checkpointing()
-    
-    # Initialize optimizers
-    weight_decay = 0.01
-    # Build optimizer only on phase-1 blocks ([4,8])
-    optimizer_g = create_optimizer_for_active_blocks(
-        generator, 
-        progressive_schedule[0][0],  # First phase's resolutions
-        lr=lr, 
-        betas=(beta1, beta2), 
-        weight_decay=weight_decay
-    )
-    optimizer_d = torch.optim.AdamW(discriminator.parameters(), lr=lr, betas=(beta1, beta2), weight_decay=weight_decay)
-    
-    # Initialize AMP scaler for mixed precision training
-    scaler = torch.cuda.amp.GradScaler() if use_amp and torch.cuda.is_available() else None
-    
-    # Create schedulers for both optimizers
-    lr_scheduler_g = CosineAnnealingLR(
-        optimizer_g,
-        T_max=num_epochs - kl_annealing_epochs,  # Exclude warmup epochs
-        eta_min=lr * 0.05  # Minimum LR at 5% of initial
-    )
-    lr_scheduler_d = CosineAnnealingLR(
-        optimizer_d,
-        T_max=num_epochs - kl_annealing_epochs,
-        eta_min=lr * 0.05
-    )
-    
-    # Initialize loss function
-    gan_loss = AuroraGANLoss(device)
-    
-    # Calculate epochs for each phase based on fractions
-    total_epochs_processed = 0
-    num_phases = len(progressive_schedule)
-    phase_epochs = [0] * num_phases  # Initialize with zeros
-
-    ideal_epochs_float = [num_epochs * fraction for _, fraction in progressive_schedule]
-
-    # Assign the integer part first
-    for i in range(num_phases):
-        phase_epochs[i] = int(ideal_epochs_float[i])  # Use floor (int())
-
-    # Calculate remaining epochs
-    remaining_epochs = num_epochs - sum(phase_epochs)
-
-    # Distribute remaining epochs based on largest fractional part
-    # Calculate fractional parts
-    fractional_parts = [ideal - floor for ideal, floor in zip(ideal_epochs_float, phase_epochs)]
-
-    # Get indices sorted by fractional part descending
-    indices_sorted_by_fraction = sorted(range(num_phases), key=lambda k: fractional_parts[k], reverse=True)
-
-    # Distribute remainder to phases with largest fractions first
-    for i in range(remaining_epochs):
-        phase_index_to_increment = indices_sorted_by_fraction[i % num_phases]
-        phase_epochs[phase_index_to_increment] += 1
-
-    # Ensure minimum of 1 epoch per phase
-    for i in range(num_phases):
-        if phase_epochs[i] == 0:
-            logger.warning(f"Phase {i} calculated 0 epochs, setting to 1.")
-            phase_epochs[i] = 1
-
-    # Final check
-    if sum(phase_epochs) != num_epochs:
-        logger.warning(f"Calculated phase epochs {phase_epochs} sum to {sum(phase_epochs)}, expected {num_epochs}. Adjusting last phase.")
-        diff = num_epochs - sum(phase_epochs)
-        phase_epochs[-1] += diff
-
-    print(f"Calculated phase epochs: {phase_epochs}")  # Log the result
-    
-    # Training loop with progressive phases
-    step = 0
-    
-    # Initialize counters for OOM tracking
-    total_oom_count = 0
-    consecutive_oom_count = 0
-    
-    # Initialize dynamic batch size adjustment
-    current_effective_batch_size = dataloader.batch_size
-    current_accumulation_steps = gradient_accumulation_steps
-    
-    for phase_idx, (active_resolutions, _) in enumerate(progressive_schedule):
-        # Aggressive memory cleanup before starting phase
-        torch.cuda.empty_cache()
-        gc.collect()
-        
-        if torch.cuda.is_available():
-            # Reset and log memory stats at start of phase
-            torch.cuda.reset_peak_memory_stats()
-            print(f"Memory at phase {phase_idx+1} start: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
-            
-            # Log total, free and reserved GPU memory
-            if hasattr(torch.cuda, 'get_device_properties'):
-                prop = torch.cuda.get_device_properties(device)
-                total_mem = prop.total_memory / 1e9
-                reserved_mem = torch.cuda.memory_reserved() / 1e9
-                allocated_mem = torch.cuda.memory_allocated() / 1e9
-                free_mem = total_mem - reserved_mem
-                print(f"GPU memory status: Total: {total_mem:.2f} GB, Reserved: {reserved_mem:.2f} GB, "
-                      f"Allocated: {allocated_mem:.2f} GB, Free: {free_mem:.2f} GB")
-        
-        phase_start_epoch = total_epochs_processed
-        phase_end_epoch = phase_start_epoch + phase_epochs[phase_idx]
-        
-        print(f"\n{'='*50}")
-        print(f"Starting Phase {phase_idx+1}: Resolutions {active_resolutions}")
-        print(f"Training for {phase_epochs[phase_idx]} epochs ({phase_start_epoch+1}-{phase_end_epoch})")
-        print(f"{'='*50}\n")
-        
-        # Set active resolutions for this phase
-        generator.set_active_resolutions(active_resolutions)
-        
-        # Reset optimizer state for newly activated blocks
-        if phase_idx > 0:  # Skip for first phase
-            print(f"\nReinitializing optimizer for phase {phase_idx+1} with resolutions {active_resolutions}")
-            
-            # Aggressive memory cleanup before creating new optimizer
-            torch.cuda.empty_cache()
-            gc.collect()
-            
-            # Explicitly delete old optimizer and scheduler to free memory
-            del optimizer_g
-            del lr_scheduler_g
-            
-            # Force garbage collection
-            gc.collect()
-            torch.cuda.empty_cache()
-            
-            # Memory check before creating new optimizer
-            if torch.cuda.is_available():
-                print(f"Memory before optimizer creation: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
-            
-            # Create new optimizer with only active parameters
-            optimizer_g = create_optimizer_for_active_blocks(
-                generator, 
-                active_resolutions,
-                lr=lr, 
-                betas=(beta1, beta2), 
-                weight_decay=weight_decay
-            )
-            
-            # Memory check after creating optimizer
-            if torch.cuda.is_available():
-                print(f"Memory after optimizer creation: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
-                torch.cuda.reset_peak_memory_stats()
-            
-            # Create new scheduler for the optimizer
-            lr_scheduler_g = CosineAnnealingLR(
-                optimizer_g,
-                T_max=num_epochs - kl_annealing_epochs,
-                eta_min=lr * 0.05
-            )
-            
-            # Report memory and parameter stats
-            if torch.cuda.is_available():
-                torch.cuda.reset_peak_memory_stats()
-            
-            print(f"New optimizer created with {sum(p.numel() for p in optimizer_g.param_groups[0]['params'])} parameters")
-        
-        # Reset batch size adjustments for new phase if needed
-        if total_oom_count > 10 and phase_idx > 0:
-            # Reduce effective batch size if we've seen too many OOMs
-            old_accumulation = current_accumulation_steps
-            current_accumulation_steps = min(current_accumulation_steps * 2, 64)  # Double steps, max 64
-            print(f"⚠️ Adjusting gradient accumulation steps from {old_accumulation} to {current_accumulation_steps} due to memory pressure")
-            total_oom_count = 0  # Reset counter
-        
-        # Train for this phase
-        for epoch in range(phase_start_epoch, phase_end_epoch):
-            # Clear memory at start of epoch
-            torch.cuda.empty_cache()
-            gc.collect()
-            
-            if torch.cuda.is_available():
-                # Reset and log memory stats at start of epoch
-                torch.cuda.reset_peak_memory_stats()
-                print(f"Memory at epoch {epoch+1} start: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
-            
-            print(f"Starting epoch {epoch+1}/{num_epochs}")
-            
-            # Calculate annealing factors specific to phase
-            phase_epoch = epoch - phase_start_epoch
-            phase_epochs_total = phase_end_epoch - phase_start_epoch
-            global_progress = epoch / num_epochs  # Overall training progress
-            
-            # Calculate annealing factors specific to phase
-            temperature_factor = max(1.0, 3.0 - phase_epoch * (2.0 / max(1, phase_epochs_total))) 
-            
-            # Enhanced KL annealing with phase awareness
-            if phase_idx == 0:  
-                # First phase - standard linear warmup but over more epochs
-                kl_warmup_factor = min(1.0, phase_epoch / kl_annealing_epochs)
-            else:
-                # Later phases - use cosine schedule with higher starting point
-                min_kl_value = 0.5  # Higher floor for stability in later phases
-                phase_progress = phase_epoch / phase_epochs_total
-                
-                # Cosine schedule for smooth transitions
-                kl_warmup_factor = min_kl_value + (1.0 - min_kl_value) * (
-                    0.5 * (1 + math.cos(math.pi * (1 - phase_progress)))
-                )
-
-            effective_kl_weight = kl_weight * kl_warmup_factor
-            
-            # Add debug logging
-            print(f"  Global progress: {global_progress:.2f}, Phase progress: {phase_epoch}/{phase_epochs_total}")
-            print(f"  KL warmup factor: {kl_warmup_factor:.3f}")
-            print(f"  Phase {phase_idx+1} Epoch {phase_epoch+1}/{phase_epochs_total}")
-            print(f"  Temperature factor: {temperature_factor:.2f}")
-            print(f"  Effective KL weight: {effective_kl_weight:.8f}")
-            print(f"  Gradient accumulation steps: {current_accumulation_steps}")
-            
-            # Adjust learning rates during the early epochs of a new phase
-            if phase_idx > 0 and phase_epoch < 5:  # First 5 epochs of phases after the first
-                warmup_factor = (phase_epoch + 1) / 5  # Gradual increase from 20% to 100%
-                
-                # Find param groups for newly added blocks
-                if len(optimizer_g.param_groups) > 1:  # If we added param groups above
-                    for group_idx in range(1, len(optimizer_g.param_groups)):
-                        # Gradually increase from 50% to 100% of base learning rate
-                        target_lr = lr * (0.5 + 0.5 * warmup_factor)
-                        current_lr = optimizer_g.param_groups[group_idx]['lr']
-                        optimizer_g.param_groups[group_idx]['lr'] = current_lr * 0.9 + target_lr * 0.1
-                        
-                        print(f"  Warming up LR for new blocks: {optimizer_g.param_groups[group_idx]['lr']:.6f}")
-            
-            # Initialize epoch metrics
-            running_d_loss = 0.0
-            running_g_loss = 0.0
-            running_r1_loss = 0.0
-            running_kl_loss = 0.0
-            running_balance_loss = 0.0
-            running_clip_loss_64 = 0.0
-            running_clip_loss_32 = 0.0
-            
-            # Reset gradients at start of epoch
-            optimizer_d.zero_grad()
-            optimizer_g.zero_grad()
-            
-            # Create progress bar
-            epoch_pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{num_epochs}")
-            
-            # Reset batch counters for memory monitoring
-            batch_count = 0
-            memory_warning_count = 0
-            epoch_oom_count = 0
-            
-            # Periodic memory cleanup interval
-            memory_cleanup_interval = 10  # Check every 10 batches
-            
-            for batch_idx, (real_images, text_embeddings) in enumerate(epoch_pbar):
-                batch_size = real_images.size(0)
-                batch_count += 1
-                
-                # Periodic memory monitoring and cleanup
-                if batch_count % memory_cleanup_interval == 0 and torch.cuda.is_available():
-                    current_mem = torch.cuda.memory_allocated() / 1e9
-                    peak_mem = torch.cuda.max_memory_allocated() / 1e9
-                    print(f"Batch {batch_idx} memory: {current_mem:.2f} GB, Peak: {peak_mem:.2f} GB")
-                    
-                    # Check if we're approaching memory limit (80% of limit)
-                    if peak_mem > batch_memory_limit * 0.8:
-                        print("⚠️ Approaching memory limit, forcing cleanup")
-                        # Force cleanup
-                        torch.cuda.empty_cache()
-                        gc.collect()
-                
-                # Check memory limit
-                if batch_memory_limit and torch.cuda.is_available():
-                    current_memory = torch.cuda.memory_allocated() / 1e9  # Convert to GB
-                    if current_memory > batch_memory_limit:
-                        memory_warning_count += 1
-                        epoch_oom_count += 1
-                        total_oom_count += 1
-                        consecutive_oom_count += 1
-                        
-                        logger.warning(f"Memory limit exceeded: {current_memory:.2f}GB > {batch_memory_limit}GB "
-                                       f"(warning #{memory_warning_count}, consecutive #{consecutive_oom_count})")
-                        logger.warning("Skipping batch to prevent OOM error")
-                        
-                        # Aggressive cleanup
-                        torch.cuda.empty_cache()
-                        gc.collect()
-                        
-                        # If we've had too many consecutive memory warnings, reduce batch size dynamically
-                        if consecutive_oom_count >= 3:
-                            old_steps = current_accumulation_steps
-                            current_accumulation_steps = min(current_accumulation_steps * 2, 64)  # Double steps, max 64
-                            logger.warning(f"Multiple consecutive OOM warnings! Increasing gradient accumulation "
-                                          f"from {old_steps} to {current_accumulation_steps}.")
-                            consecutive_oom_count = 0  # Reset counter
-                        
-                        continue
-                    else:
-                        # Reset consecutive counter when we have a successful batch
-                        consecutive_oom_count = 0
-                
-                # We made it past memory check, proceed with training
-                
-                # Move data to device
-                real_images = real_images.to(device)
-                text_embeddings = text_embeddings.to(device)
-
-                # Sample random noise
-                z = torch.randn(batch_size, LATENT_DIM, device=device)
-
-                # ------------------------
-                # Train Discriminator
-                # ------------------------
-                # Zero gradients based on current accumulation steps
-                if batch_idx % current_accumulation_steps == 0:
-                    optimizer_d.zero_grad()
-
-                # Enable gradient computation for R1 penalty
-                real_images.requires_grad = True
-                
-                with torch.cuda.amp.autocast() if use_amp else nullcontext():
-                    real_pred = discriminator(real_images, text_embeddings)
-
-                    # --- R1 Regularization ---
-                    grad_real, = torch.autograd.grad(
-                        outputs=real_pred.sum(), inputs=real_images, create_graph=True
-                    )
-                    grad_penalty = grad_real.view(grad_real.size(0), -1).norm(2, dim=1) ** 2
-                    r1_loss = (r1_gamma / 2) * grad_penalty.mean()  # Divide gamma by 2, common practice
-
-                    # --- Fake images ---
-                    with torch.no_grad():
-                        # Request intermediate output for multi-level CLIP later
-                        fake_images_64, fake_images_32, _, _ = generator(
-                            z, 
-                            text_embeddings, 
-                            return_intermediate=True, 
-                            return_routing=True,
-                            annealing_factor=temperature_factor  # Pass temperature factor
-                        )
-                    fake_pred = discriminator(fake_images_64.detach(), text_embeddings)  # Use final fake image
-
-                    # --- Mismatched real images/text ---
-                    shuffled_indices = torch.randperm(batch_size)
-                    mismatched_text_embeddings = text_embeddings[shuffled_indices]
-                    mismatched_pred = discriminator(real_images.detach(), mismatched_text_embeddings)  # Use detached real images
-
-                    # --- Discriminator loss (includes matching-aware) ---
-                    d_loss_gan = gan_loss.discriminator_loss(real_pred, fake_pred, mismatched_pred)
-
-                    # Total Discriminator Loss
-                    d_loss = d_loss_gan + r1_loss
-                
-                # Check for NaN/Inf in discriminator loss
-                if torch.isnan(d_loss).item() or torch.isinf(d_loss).item():
-                    print(f"⚠️ NaN/Inf detected in discriminator loss! Skipping this batch.")
-                    continue
-                
-                # Scale the loss if using AMP
-                if scaler:
-                    scaler.scale(d_loss / current_accumulation_steps).backward()
-                else:
-                    (d_loss / current_accumulation_steps).backward()
-                
-                # Only step optimizer after accumulating gradients
-                if (batch_idx + 1) % current_accumulation_steps == 0 or (batch_idx + 1) == len(dataloader):
-                    if scaler:
-                        # Clip before scaler step
-                        scaler.unscale_(optimizer_d)
-                        torch.nn.utils.clip_grad_norm_(discriminator.parameters(), max_norm=0.8)
-                        scaler.step(optimizer_d)
-                        scaler.update()
-                    else:
-                        torch.nn.utils.clip_grad_norm_(discriminator.parameters(), max_norm=0.8)
-                        optimizer_d.step()
-                    
-                    # Clear discriminator part of computation graph from memory
-                    del grad_real, grad_penalty, real_pred, fake_pred, mismatched_pred
-                    
-                    # Periodic memory check after discriminator step
-                    if torch.cuda.is_available() and batch_idx % (current_accumulation_steps * 5) == 0:
-                        current_mem = torch.cuda.memory_allocated() / 1e9
-                        print(f"Memory after D step: {current_mem:.2f} GB")
-
-                # ------------------------
-                # Train Generator
-                # ------------------------
-                if batch_idx % current_accumulation_steps == 0:
-                    optimizer_g.zero_grad()
-
-                with torch.cuda.amp.autocast() if use_amp else nullcontext():
-                    # Generate fake images, get intermediate, KL loss, and routing probs
-                    fake_images_64, fake_images_32, kl_loss, routing_probs = generator(
-                        z, 
-                        text_embeddings, 
-                        return_intermediate=True, 
-                        return_routing=True,
-                        annealing_factor=temperature_factor  # Pass temperature factor
-                    )
-
-                    # Apply safe handling to KL loss
-                    if kl_loss is not None:
-                        # Detect and prevent extreme KL values
-                        if torch.isnan(kl_loss).item() or torch.isinf(kl_loss).item():
-                            print(f"⚠️ NaN/Inf detected in KL loss! Replacing with zero.")
-                            # Ensure kl_loss requires grad if it's part of the computation graph before replacement
-                            original_requires_grad = kl_loss.requires_grad
-                            kl_loss = torch.tensor(0.0, device=device, requires_grad=original_requires_grad)
-                        elif (kl_loss > 70.0).item():
-                            print(f"⚠️ Extremely high KL detected: {kl_loss.item():.2f}, clamping to 70.0")
-                            # Ensure kl_loss requires grad if it's part of the computation graph before replacement
-                            original_requires_grad = kl_loss.requires_grad
-                            kl_loss = torch.tensor(70.0, device=device, requires_grad=original_requires_grad)
-                            
-                    # Discriminator prediction on fake images (use final resolution)
-                    fake_pred_g = discriminator(fake_images_64, text_embeddings)  # Use G's output directly
-
-                    # --- Generator Adversarial Loss ---
-                    g_loss_gan = gan_loss.generator_loss(fake_pred_g)
-
-                    # --- Multi-level CLIP Loss ---
-                    clip_loss_64 = gan_loss.compute_clip_loss(fake_images_64, text_embeddings)
-                    clip_loss_32 = gan_loss.compute_clip_loss(fake_images_32, text_embeddings)  # CLIP loss on 32x32
-                    g_loss_clip = (clip_weight_64 * clip_loss_64) + (clip_weight_32 * clip_loss_32)
-
-                    # --- MoE Balance Loss ---
-                    balance_loss = gan_loss.moe_balance_loss(routing_probs, balance_weight=balance_weight)
-
-                    # --- Total Generator Loss ---
-                    g_loss = g_loss_gan + g_loss_clip + balance_loss
-                    
-                    # Check for NaN/Inf in generator loss
-                    if torch.isnan(g_loss).item() or torch.isinf(g_loss).item():
-                        print("⚠️ NaN or Inf detected in generator loss! Resetting to zero.")
-                        original_requires_grad = g_loss.requires_grad
-                        g_loss = torch.tensor(0.0, device=device, requires_grad=original_requires_grad)
-                    
-                    # Add KL loss separately
-                    if kl_loss is not None:
-                        kl_component = effective_kl_weight * kl_loss
-                        g_loss = g_loss + kl_component
-                
-                # Scale the loss if using AMP
-                if scaler:
-                    scaler.scale(g_loss / current_accumulation_steps).backward()
-                else:
-                    (g_loss / current_accumulation_steps).backward()
-                
-                # Only step optimizer after accumulating gradients
-                if (batch_idx + 1) % current_accumulation_steps == 0 or (batch_idx + 1) == len(dataloader):
-                    if scaler:
-                        # Clip before scaler step
-                        scaler.unscale_(optimizer_g)
-                        torch.nn.utils.clip_grad_norm_(generator.parameters(), max_norm=0.8)
-                        scaler.step(optimizer_g)
-                        scaler.update()
-                    else:
-                        torch.nn.utils.clip_grad_norm_(generator.parameters(), max_norm=0.8)
-                        optimizer_g.step()
-                    
-                    # Periodic memory check and cleanup after generator step
-                    if torch.cuda.is_available() and batch_idx % (current_accumulation_steps * 5) == 0:
-                        peak_mem = torch.cuda.max_memory_allocated() / 1e9
-                        current_mem = torch.cuda.memory_allocated() / 1e9
-                        print(f"Memory after G step: {current_mem:.2f} GB, Peak: {peak_mem:.2f} GB")
-                        
-                        if peak_mem > batch_memory_limit * 0.8:  # Over 80% of limit
-                            print(f"⚠️ High memory usage detected: {peak_mem:.2f} GB")
-                            # Force cleanup
-                            torch.cuda.empty_cache()
-                            gc.collect()
-                            # Reset peak stats after cleanup
-                            torch.cuda.reset_peak_memory_stats()
-
-                # Update running losses for progress bar
-                running_d_loss = 0.9 * running_d_loss + 0.1 * d_loss_gan.item()  # Track gan part of D loss
-                running_r1_loss = 0.9 * running_r1_loss + 0.1 * r1_loss.item()
-                running_g_loss = 0.9 * running_g_loss + 0.1 * g_loss_gan.item()  # Track gan part of G loss
-                running_kl_loss = 0.9 * running_kl_loss + 0.1 * kl_loss.item() if kl_loss is not None else running_kl_loss
-                running_balance_loss = 0.9 * running_balance_loss + 0.1 * balance_loss.item()
-                running_clip_loss_64 = 0.9 * running_clip_loss_64 + 0.1 * clip_loss_64.item()
-                running_clip_loss_32 = 0.9 * running_clip_loss_32 + 0.1 * clip_loss_32.item()
-
-                # Update progress bar description with loss values
-                epoch_pbar.set_postfix({
-                    'D_loss': f'{running_d_loss:.3f}',
-                    'R1': f'{running_r1_loss:.3f}',
-                    'G_loss': f'{running_g_loss:.3f}',
-                    'KL': f'{running_kl_loss:.4f}',
-                    'Balance': f'{running_balance_loss:.4f}',
-                    'Clip64': f'{running_clip_loss_64:.3f}',
-                    'Clip32': f'{running_clip_loss_32:.3f}',
-                })
-
-                # Clean up batch-specific tensors
-                del real_images, text_embeddings, z
-                del fake_images_64, fake_images_32, routing_probs
-                if 'grad_real' in locals(): del grad_real
-                if 'fake_pred_g' in locals(): del fake_pred_g
-
-                # Logging
-                if step % log_interval == 0:
-                    logger.info(f"\nStep [{step}] Epoch [{epoch+1}] Batch [{batch_idx}/{len(dataloader)}] "
-                          f"D_loss: {d_loss.item():.4f} (GAN: {d_loss_gan.item():.4f}, R1: {r1_loss.item():.4f}), "
-                          f"G_loss: {g_loss.item():.4f} (GAN: {g_loss_gan.item():.4f}, Clip64: {clip_loss_64.item():.4f}, "
-                          f"Clip32: {clip_loss_32.item():.4f}, KL: {kl_loss.item() if kl_loss is not None else 0:.4f}, "
-                          f"Balance: {balance_loss.item():.4f})")
-                    
-                    if torch.cuda.is_available():
-                        current_mem = torch.cuda.memory_allocated() / 1e9
-                        peak_mem = torch.cuda.max_memory_allocated() / 1e9
-                        print(f"Current memory: {current_mem:.2f} GB, Peak: {peak_mem:.2f} GB")
-
-                step += 1
-
-            # Close the progress bar for this epoch
-            epoch_pbar.close()
-            
-            # End of epoch memory cleanup
-            torch.cuda.empty_cache()
-            gc.collect()
-            
-            # Log memory stats at end of epoch
-            if torch.cuda.is_available():
-                torch.cuda.reset_peak_memory_stats()
-                print(f"Memory after epoch {epoch+1}: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
-                
-            # Report epoch OOM count
-            if epoch_oom_count > 0:
-                print(f"⚠️ Epoch had {epoch_oom_count} OOM warnings")
-
-            # ===== VALIDATION SECTION =====
-            if val_dataloader is not None:
-                generator.eval()
-                discriminator.eval()
-
-                val_g_loss_gan = 0
-                val_d_loss_gan = 0
-                val_clip_loss_64 = 0
-                val_clip_loss_32 = 0
-                val_samples = 0
-                
-                # Memory cleanup before validation
-                torch.cuda.empty_cache()
-                gc.collect()
-
-                print("Running validation...")
-                val_pbar = tqdm(val_dataloader, desc=f"Validation Epoch {epoch+1}")
-
-                with torch.no_grad():
-                    for val_real_images, val_text_embeddings in val_pbar:
-                        val_batch_size = val_real_images.size(0)
-                        val_samples += val_batch_size
-
-                        val_real_images = val_real_images.to(device)
-                        val_text_embeddings = val_text_embeddings.to(device)
-                        val_z = torch.randn(val_batch_size, LATENT_DIM, device=device)
-
-                        # Memory check before validation step
-                        if torch.cuda.is_available() and batch_memory_limit:
-                            current_memory = torch.cuda.memory_allocated() / 1e9
-                            if current_memory > batch_memory_limit * 0.9:  # 90% of limit
-                                print(f"⚠️ High memory during validation: {current_memory:.2f} GB")
-                                torch.cuda.empty_cache()
-                                gc.collect()
-                        
-                        # Real images
-                        val_real_pred = discriminator(val_real_images, val_text_embeddings)
-
-                        # Fake images - Pass temperature factor here too
-                        val_fake_images_64, val_fake_images_32, val_kl_loss = generator(
-                            val_z, 
-                            val_text_embeddings, 
-                            return_intermediate=True,
-                            annealing_factor=temperature_factor
-                        )
-
-                        # Fake images prediction
-                        val_fake_pred = discriminator(val_fake_images_64, val_text_embeddings)
-
-                        # Mismatched prediction
-                        val_shuffled_indices = torch.randperm(val_batch_size)
-                        val_mismatched_text = val_text_embeddings[val_shuffled_indices]
-                        val_mismatched_pred = discriminator(val_real_images, val_mismatched_text)
-
-                        # Losses
-                        batch_d_loss = gan_loss.discriminator_loss(
-                            val_real_pred, val_fake_pred, val_mismatched_pred
-                        ).item()
-                        
-                        batch_g_loss = gan_loss.generator_loss(
-                            val_fake_pred, val_kl_loss, kl_weight=effective_kl_weight
-                        ).item()
-                        
-                        batch_clip_loss_64 = gan_loss.compute_clip_loss(
-                            val_fake_images_64, val_text_embeddings
-                        ).item()
-                        
-                        batch_clip_loss_32 = gan_loss.compute_clip_loss(
-                            val_fake_images_32, val_text_embeddings
-                        ).item()
-
-                        val_d_loss_gan += batch_d_loss * val_batch_size
-                        val_g_loss_gan += batch_g_loss * val_batch_size
-                        val_clip_loss_64 += batch_clip_loss_64 * val_batch_size
-                        val_clip_loss_32 += batch_clip_loss_32 * val_batch_size
-
-                        val_pbar.set_postfix({
-                            'D_loss': f'{batch_d_loss:.4f}',
-                            'G_loss': f'{batch_g_loss:.4f}',
-                            'Clip64': f'{batch_clip_loss_64:.4f}',
-                            'Clip32': f'{batch_clip_loss_32:.4f}'
-                        })
-                        
-                        # Clean up validation batch tensors
-                        del val_real_images, val_text_embeddings, val_z
-                        del val_fake_images_64, val_fake_images_32
-                        del val_real_pred, val_fake_pred, val_mismatched_pred
-
-                val_pbar.close()
-                
-                # Memory cleanup after validation
-                torch.cuda.empty_cache()
-                gc.collect()
-                
-                # Average losses
-                if val_samples > 0:
-                    val_d_loss_gan /= val_samples
-                    val_g_loss_gan /= val_samples
-                    val_clip_loss_64 /= val_samples
-                    val_clip_loss_32 /= val_samples
-
-                    # Collect metrics for reporting
-                    val_metrics = {
-                        'val_d_loss': val_d_loss_gan,
-                        'val_g_loss': val_g_loss_gan,
-                        'val_clip_loss_64': val_clip_loss_64,
-                        'val_clip_loss_32': val_clip_loss_32,
-                        'val_clip_loss': val_clip_loss_64  # Primary metric for HPO
-                    }
-
-                    print(f"Validation Results - D_loss: {val_d_loss_gan:.4f}, G_loss: {val_g_loss_gan:.4f}, "
-                         f"Clip_Loss_64: {val_clip_loss_64:.4f}, Clip_Loss_32: {val_clip_loss_32:.4f}")
-                    
-                    # Call the metric callback if provided
-                    if metric_callback:
-                        if not metric_callback(epoch, val_metrics):
-                            # If the callback returns False, stop training
-                            print("Early stopping triggered by metric callback")
-                            break
-
-                generator.train()
-                discriminator.train()
-                
-                # Step learning rate schedulers after validation
-                if epoch >= kl_annealing_epochs:
-                    lr_scheduler_g.step()
-                    lr_scheduler_d.step()
-                    
-                    # Log current learning rates
-                    current_lr_g = lr_scheduler_g.get_last_lr()[0]
-                    current_lr_d = lr_scheduler_d.get_last_lr()[0]
-                    print(f"  Current learning rates - G: {current_lr_g:.8f}, D: {current_lr_d:.8f}")
-
-            # Optional: Save checkpoint at end of epoch
-            # if (epoch + 1) % save_interval == 0:
-            #     epoch_save_path = os.path.join(save_dir, f"aurora_checkpoint_epoch_{epoch+1}.pt")
-            #     torch.save({
-            #         'generator': generator.state_dict(),
-            #         'discriminator': discriminator.state_dict(),
-            #         'optimizer_g': optimizer_g.state_dict(),
-            #         'optimizer_d': optimizer_d.state_dict(),
-            #         'epoch': epoch + 1,
-            #         'step': step,
-            #         'phase': phase_idx
-            #     }, epoch_save_path)
-            #     print(f"Checkpoint saved to {epoch_save_path}")
-            
-        # At the end of phase, log memory stats and clean up
-        if torch.cuda.is_available():
-            print(f"Phase {phase_idx+1} complete.")
-            print(f"Final phase memory stats:")
-            print(f"  Allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
-            print(f"  Reserved: {torch.cuda.memory_reserved() / 1e9:.2f} GB")
-        
-        # Optional: Save phase checkpoint
-        # phase_save_path = os.path.join(save_dir, f"phase_{phase_idx+1}_checkpoint.pt")
-        # torch.save({
-        #     'generator': generator.state_dict(),
-        #     'discriminator': discriminator.state_dict(),
-        #     'optimizer_g': optimizer_g.state_dict(),
-        #     'optimizer_d': optimizer_d.state_dict(),
-        #     'phase': phase_idx + 1,
-        #     'epoch': phase_end_epoch,
-        #     'step': step
-        # }, phase_save_path)
-        # print(f"Phase {phase_idx+1} checkpoint saved to {phase_save_path}")
-                
-        # Update total epochs processed
-        total_epochs_processed = phase_end_epoch
-        
-        # Aggressive memory cleanup between phases
-        torch.cuda.empty_cache()
-        gc.collect()
-        if hasattr(torch, 'cuda') and hasattr(torch.cuda, 'memory_stats'):
-            torch.cuda.reset_peak_memory_stats()
-    
-    # Training complete, final memory cleanup
+    # Final memory cleanup
     torch.cuda.empty_cache()
     gc.collect()
     
-    # Optional: Save final model
+    # Save final model
     # final_save_path = os.path.join(save_dir, "aurora_final.pt")
     # torch.save({
     #     'generator': generator.state_dict(),
     #     'discriminator': discriminator.state_dict(),
-    #     'optimizer_g': optimizer_g.state_dict(),
-    #     'optimizer_d': optimizer_d.state_dict(),
     #     'epoch': num_epochs,
     #     'step': step
     # }, final_save_path)
+    
     # print(f"Final model saved to {final_save_path}")
     
     return generator, discriminator
+
 
 def sample_aurora_gan(generator, text_prompt, num_samples=1, truncation_psi=0.7, device=DEVICE):
     """
