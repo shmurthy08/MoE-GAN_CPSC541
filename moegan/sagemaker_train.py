@@ -193,7 +193,7 @@ def main():
         
         # Load training dataset (USING ONLY 50% OF DATA FOR FASTER TRAINING)
         print("Loading training data from {} and {}".format(train_img_path, train_emb_path))
-        train_dataset = SimpleDataset(train_img_path, train_emb_path, use_percentage=0.2)
+        train_dataset = SimpleDataset(train_img_path, train_emb_path, use_percentage=0.35)
         print("Loaded {} training samples (20% of total)".format(len(train_dataset)))
         
         # Setup CloudWatch metrics
@@ -307,9 +307,9 @@ def main():
             log_interval=100,
             save_interval=500,
             metric_callback=metric_callback,
-            gradient_accumulation_steps=9,
+            gradient_accumulation_steps=8,
             checkpoint_activation=True,
-            batch_memory_limit=11.0,
+            batch_memory_limit=12.0,
             progressive_schedule=progressive_schedule
         )
         

@@ -1059,6 +1059,30 @@ class AuroraGANLoss:
 
 from tqdm import tqdm
 
+def create_optimizer_for_active_blocks(generator, active_resolutions, lr, betas, weight_decay):
+    """Create a fresh optimizer with only the active parameters"""
+    # Always include these core parameters
+    active_params = list(generator.text_projection.parameters()) + \
+                   list(generator.mapping.parameters()) + \
+                   [generator.constant]
+    
+    # Add resolution-specific parameters
+    if 4 in active_resolutions:
+        active_params.extend(generator.gen_block_4.parameters())
+    if 8 in active_resolutions:
+        active_params.extend(generator.gen_block_8.parameters())
+    if 16 in active_resolutions:
+        active_params.extend(generator.gen_block_16.parameters())
+    if 32 in active_resolutions:
+        active_params.extend(generator.gen_block_32.parameters())
+        active_params.extend(generator.to_rgb_32.parameters())
+    if 64 in active_resolutions:
+        active_params.extend(generator.gen_block_64.parameters())
+        active_params.extend(generator.to_rgb_64.parameters())
+    
+    return torch.optim.AdamW(active_params, lr=lr, betas=betas, weight_decay=weight_decay)
+
+
 def train_aurora_gan(
     dataloader, val_dataloader=None,
     num_epochs=50, lr=0.0002, beta1=0.5, beta2=0.999,
@@ -1074,7 +1098,7 @@ def train_aurora_gan(
     use_amp=True,          # Automatic mixed precision
     gradient_accumulation_steps=4, # Gradient accumulation for larger effective batch size
     checkpoint_activation=True,    # Enable gradient checkpointing
-    batch_memory_limit=11.0        # Memory limit per batch in GB
+    batch_memory_limit=12.0        # Memory limit per batch in GB
 ):
     """
     Train the Aurora GAN model with R1, Matching-Aware, Multi-level CLIP loss.
@@ -1275,10 +1299,7 @@ def train_aurora_gan(
 
                 # --- Total Generator Loss ---
                 g_loss = g_loss_gan + g_loss_clip + balance_loss
-                if torch.isnan(g_loss).item() or torch.isinf(g_loss).item():
-                    print("⚠️ NaN or Inf detected in generator loss! Skipping batch.")
-                    optimizer_g.zero_grad()  # Clear gradients
-                    continue
+                
                 
                 # Add KL loss separately to avoid tensor in boolean context
                 if kl_loss is not None:
@@ -1637,39 +1658,30 @@ def progressive_train_aurora_gan(
         print(f"Memory cleared at start of phase {phase_idx+1}")
         # Reset optimizer state for newly activated blocks
         if phase_idx > 0:  # Skip for first phase
-            # Get the highest resolution from previous phase
-            prev_phase_max_res = max(progressive_schedule[phase_idx-1][0])
-            # Get newly activated resolutions
-            new_resolutions = [res for res in active_resolutions if res > prev_phase_max_res]
+            print(f"\nReinitializing optimizer for phase {phase_idx+1} with resolutions {active_resolutions}")
             
-            if new_resolutions:
-                print(f"Resetting optimizer state for newly activated blocks: {new_resolutions}")
-                
-                # Identify parameters from newly activated blocks
-                new_params = []
-                for res in new_resolutions:
-                    if res == 16:
-                        new_params.extend(list(generator.gen_block_16.parameters()))
-                    elif res == 32:
-                        new_params.extend(list(generator.gen_block_32.parameters()))
-                        new_params.extend(list(generator.to_rgb_32.parameters()))
-                    elif res == 64:
-                        new_params.extend(list(generator.gen_block_64.parameters()))
-                        new_params.extend(list(generator.to_rgb_64.parameters()))
-                
-                # Filter out parameters already in optimizer to avoid duplication
-                existing = {p for g in optimizer_g.param_groups for p in g['params']}
-                truly_new = [p for p in new_params if p not in existing]
+            # Aggressive memory cleanup before creating new optimizer
+            torch.cuda.empty_cache()
+            gc.collect()
+            
+            # Create new optimizer with only active parameters
+            optimizer_g = create_optimizer_for_active_blocks(
+                generator, 
+                active_resolutions,
+                lr=lr, 
+                betas=(beta1, beta2), 
+                weight_decay=weight_decay
+            )
+            
+            # Create new scheduler for the optimizer
+            lr_scheduler_g = CosineAnnealingLR(
+                optimizer_g,
+                T_max=num_epochs - kl_annealing_epochs,
+                eta_min=lr * 0.05
+            )
+            
+            print(f"New optimizer created with {sum(p.numel() for p in optimizer_g.param_groups[0]['params'])} parameters")
 
-                if truly_new:
-                    print(f"Adding {len(truly_new)} new params for resolutions {new_resolutions} to optimizer")
-                    # Add new parameters to optimizer with a different learning rate
-                    optimizer_g.add_param_group({
-                        'params': truly_new,
-                        'lr': lr * 0.5   # warm-up LR for new blocks
-                    })
-                else:
-                    print("No new params to add at this phase")
 
         
         # Train for this phase
@@ -1873,6 +1885,10 @@ def progressive_train_aurora_gan(
 
                     # --- Total Generator Loss ---
                     g_loss = g_loss_gan + g_loss_clip + balance_loss
+                    if torch.isnan(g_loss).item() or torch.isinf(g_loss).item():
+                        print("⚠️ NaN or Inf detected in generator loss! Skipping batch.")
+                        optimizer_g.zero_grad()  # Clear gradients
+                        continue
                     
                     # Add KL loss separately to avoid tensor in boolean context
                     if kl_loss is not None:
