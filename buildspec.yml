@@ -659,6 +659,12 @@ phases:
         FRONTEND_URL="http://${PROJECT_NAME}-${ENVIRONMENT}-frontend.s3-website-${AWS_DEFAULT_REGION}.amazonaws.com"
         echo "Frontend deployed to: ${FRONTEND_URL}"
         
+        # Install jq if not already installed
+        if ! command -v jq &> /dev/null; then
+          echo "Installing jq for JSON processing"
+          apt-get update -qq && apt-get install -y jq || yum install -y jq
+        fi
+        
         # Update build_output.json with frontend URL
         cat build_output.json | jq ". + {\"FrontendUrl\": \"${FRONTEND_URL}\"}" > build_output_updated.json
         mv build_output_updated.json build_output.json
