@@ -273,32 +273,39 @@ class BayesianRouter(nn.Module):
         self.text_dim = text_dim
         self.num_experts = num_experts
         
-        # Feature projection with smaller initialization
+        # Feature projection with much smaller initialization
         self.feature_mu = nn.Parameter(torch.Tensor(feature_dim, 128))
-        # Use smaller standard deviation for initialization
-        nn.init.normal_(self.feature_mu, mean=0.0, std=0.01)
-        # Initialize rho to a value corresponding to lower initial variance
-        self.feature_rho = nn.Parameter(torch.Tensor(feature_dim, 128).fill_(-4.0))
+        # Use much smaller standard deviation for initialization
+        nn.init.normal_(self.feature_mu, mean=0.0, std=0.001)  # Changed from 0.01 to 0.001
+        # Initialize rho to a value corresponding to even lower initial variance
+        self.feature_rho = nn.Parameter(torch.Tensor(feature_dim, 128).fill_(-6.0))  # Changed from -4.0 to -6.0
         
-        # Text projection with smaller initialization
+        # Text projection with much smaller initialization
         self.text_mu = nn.Parameter(torch.Tensor(text_dim, 128))
-        nn.init.normal_(self.text_mu, mean=0.0, std=0.01)
-        self.text_rho = nn.Parameter(torch.Tensor(text_dim, 128).fill_(-4.0))
+        nn.init.normal_(self.text_mu, mean=0.0, std=0.001)  # Changed from 0.01 to 0.001
+        self.text_rho = nn.Parameter(torch.Tensor(text_dim, 128).fill_(-6.0))  # Changed from -4.0 to -6.0
         
-        # Combined projection to expert logits with smaller initialization
+        # Combined projection to expert logits with much smaller initialization
         self.combined_mu = nn.Parameter(torch.Tensor(256, num_experts))
-        nn.init.normal_(self.combined_mu, mean=0.0, std=0.01)
-        self.combined_rho = nn.Parameter(torch.Tensor(256, num_experts).fill_(-4.0))
-        
+        nn.init.normal_(self.combined_mu, mean=0.0, std=0.001)  # Changed from 0.01 to 0.001
+        self.combined_rho = nn.Parameter(torch.Tensor(256, num_experts).fill_(-6.0))  # Changed from -4.0 to -6.0
+
         # Noise for sampling
         self.register_buffer('epsilon_f', torch.zeros(feature_dim, 128))
         self.register_buffer('epsilon_t', torch.zeros(text_dim, 128))
         self.register_buffer('epsilon_c', torch.zeros(256, num_experts))
         
         # Temperature parameter - start with higher value for less sharp distributions
-        self.temperature = nn.Parameter(torch.ones(1) * 3.0)
+        self.temperature = nn.Parameter(torch.ones(1) * 4.0)
     def reparameterize(self, mu, rho, epsilon=None):
-        """Numerically stable reparameterization"""
+        """Numerically stable reparameterization with debugging"""
+        # Debug input values
+        if torch.isnan(mu).any().item() or torch.isinf(mu).any().item():
+            print(f"⚠️ NaN/Inf detected in mu before clamp: min={mu.min().item()}, max={mu.max().item()}")
+        
+        if torch.isnan(rho).any().item() or torch.isinf(rho).any().item():
+            print(f"⚠️ NaN/Inf detected in rho before clamp: min={rho.min().item()}, max={rho.max().item()}")
+            
         # Clamp mu and rho to prevent extreme values
         mu = torch.clamp(mu, min=-10.0, max=10.0)
         rho = torch.clamp(rho, min=-8.0, max=4.0)
@@ -306,16 +313,33 @@ class BayesianRouter(nn.Module):
         # More stable sigma calculation with minimum bound
         sigma = torch.clamp(torch.log1p(torch.exp(rho)), min=1e-6, max=10.0)
         
+        if torch.isnan(sigma).any().item() or torch.isinf(sigma).any().item():
+            print(f"⚠️ NaN/Inf detected in sigma: min={sigma.min().item()}, max={sigma.max().item()}")
+        
         if epsilon is None:
             epsilon = torch.randn_like(sigma)
         
         # Clamp epsilon too for more stability
         epsilon = torch.clamp(epsilon, min=-2.0, max=2.0)
         
-        return mu + sigma * epsilon
-    
+        result = mu + sigma * epsilon
+        
+        # Check for NaN/Inf in final result
+        if torch.isnan(result).any().item() or torch.isinf(result).any().item():
+            print(f"⚠️ NaN/Inf detected in reparameterize result: min={result.min().item()}, max={result.max().item()}")
+        
+        return result
+       
     def forward(self, feature, text_embedding, sampling=True, annealing_factor=1.0):
         batch_size = feature.size(0)
+        # Check inputs for NaN/Inf
+        if torch.isnan(feature).any().item() or torch.isinf(feature).any().item():
+            print(f"⚠️ NaN/Inf detected in feature input to BayesianRouter")
+            feature = torch.nan_to_num(feature, nan=0.0, posinf=1.0, neginf=-1.0)
+            
+        if torch.isnan(text_embedding).any().item() or torch.isinf(text_embedding).any().item():
+            print(f"⚠️ NaN/Inf detected in text_embedding input to BayesianRouter")
+            text_embedding = torch.nan_to_num(text_embedding, nan=0.0, posinf=1.0, neginf=-1.0)
         
         # Sample weights if in training mode
         if sampling and self.training:
@@ -1048,7 +1072,8 @@ def train_aurora_gan(
     """
     # Create save directory
     os.makedirs(save_dir, exist_ok=True)
-
+    torch.autograd.set_detect_anomaly(True)
+    print("Anomaly detection enabled - will show traceback for NaN values")
     # Memory cleanup before starting
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -1136,8 +1161,11 @@ def train_aurora_gan(
         
         # Calculate KL annealing factor 
         # Starts very low and increases over kl_annealing_epochs
-        kl_warmup_factor = min(1.0, epoch / kl_annealing_epochs)
-        effective_kl_weight = kl_weight * kl_warmup_factor
+        kl_warmup_factor = min(1.0, (epoch / kl_annealing_epochs)**2)
+        # Start with an extremely small value (1e-5) of the configured weight
+        initial_factor = 1e-5
+        actual_factor = initial_factor + (1.0 - initial_factor) * kl_warmup_factor
+        effective_kl_weight = kl_weight * actual_factor
         
         # Calculate MoE router temperature factor
         # Starts high (more uniform routing) and gradually decreases
@@ -1287,9 +1315,9 @@ def train_aurora_gan(
             
             # Scale the loss if using AMP
             if scaler:
-                scaler.scale(d_loss / current_accumulation_steps).backward()
+                scaler.scale(d_loss / current_accumulation_steps).backward(retain_graph=True)
             else:
-                (d_loss / current_accumulation_steps).backward()
+                (d_loss / current_accumulation_steps).backward(retain_graph=True)
             
             # Only step optimizer after accumulating gradients
             if (batch_idx + 1) % current_accumulation_steps == 0 or (batch_idx + 1) == len(dataloader):
