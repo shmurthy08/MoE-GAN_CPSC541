@@ -99,67 +99,67 @@ phases:
         fi
   
   # Add this in the post_build phase of deployment-buildspec.yml
-post_build:
-  commands:
-    # Create metrics file and upload to S3
-    - |
-      if [ ! -z "$LATEST_TRAINING_JOB" ] && [ ! -z "$MODEL_ARTIFACTS" ]; then
-        # Create metrics JSON file
-        cat > model_metrics.json << EOF
-        {
-          "model_id": "$LATEST_TRAINING_JOB",
-          "training_date": "$(date +%Y-%m-%d)",
-          "hyperparameters": {
-            "balance_weight": 0.006488147350209087,
-            "batch_size": 9,
-            "beta1": 0.882075398724864,
-            "beta2": 0.9385630453882949,
-            "clip_weight_16": 0.19197351204230995,
-            "clip_weight_8": 0.04016935445931133,
-            "epochs": 50,
-            "kl_annealing_epochs": 20,
-            "kl_weight": 0.0006752514413805058,
-            "learning_rate": 0.000671592452618617,
-            "r1_gamma": 9.66634402753149
-          },
-          "validation_metrics": {
-            "d_loss": 1.9575,
-            "g_loss": 0.8320,
-            "clip_loss_16": 0.8099,
-            "clip_loss_8": 0.8128
-          },
-          "description": "16x16 resolution GAN model trained for 50 epochs"
-        }
-        EOF
-        
-        # Extract S3 bucket name from MODEL_ARTIFACTS
-        S3_BUCKET=$(echo $MODEL_ARTIFACTS | cut -d'/' -f3)
-        MODEL_PREFIX=$(echo $MODEL_ARTIFACTS | cut -d'/' -f4-)
-        MODEL_DIR=$(dirname $MODEL_PREFIX)
-        
-        echo "Uploading metrics to s3://$S3_BUCKET/$MODEL_DIR/model_metrics.json"
-        aws s3 cp model_metrics.json s3://$S3_BUCKET/$MODEL_DIR/model_metrics.json
-        
-        # Create output deployment file
-        cat > deployment_output.json << EOF
-        {
-          "Deployed": true,
-          "ModelName": "gan-model-${ENVIRONMENT}",
-          "EndpointName": "gan-ep-${ENVIRONMENT}",
-          "TrainingJob": "$LATEST_TRAINING_JOB",
-          "ModelArtifacts": "$MODEL_ARTIFACTS",
-          "MetricsLocation": "s3://$S3_BUCKET/$MODEL_DIR/model_metrics.json"
-        }
-        EOF
-      else
-        cat > deployment_output.json << EOF
-        {
-          "Deployed": false,
-          "Reason": "No model artifacts or deployment failed."
-        }
-        EOF
-      fi
-      - echo "Deployment stage complete."
+  post_build:
+    commands:
+      # Create metrics file and upload to S3
+      - |
+        if [ ! -z "$LATEST_TRAINING_JOB" ] && [ ! -z "$MODEL_ARTIFACTS" ]; then
+          # Create metrics JSON file
+          cat > model_metrics.json << EOF
+          {
+            "model_id": "$LATEST_TRAINING_JOB",
+            "training_date": "$(date +%Y-%m-%d)",
+            "hyperparameters": {
+              "balance_weight": 0.006488147350209087,
+              "batch_size": 9,
+              "beta1": 0.882075398724864,
+              "beta2": 0.9385630453882949,
+              "clip_weight_16": 0.19197351204230995,
+              "clip_weight_8": 0.04016935445931133,
+              "epochs": 50,
+              "kl_annealing_epochs": 20,
+              "kl_weight": 0.0006752514413805058,
+              "learning_rate": 0.000671592452618617,
+              "r1_gamma": 9.66634402753149
+            },
+            "validation_metrics": {
+              "d_loss": 1.9575,
+              "g_loss": 0.8320,
+              "clip_loss_16": 0.8099,
+              "clip_loss_8": 0.8128
+            },
+            "description": "16x16 resolution GAN model trained for 50 epochs"
+          }
+          EOF
+          
+          # Extract S3 bucket name from MODEL_ARTIFACTS
+          S3_BUCKET=$(echo $MODEL_ARTIFACTS | cut -d'/' -f3)
+          MODEL_PREFIX=$(echo $MODEL_ARTIFACTS | cut -d'/' -f4-)
+          MODEL_DIR=$(dirname $MODEL_PREFIX)
+          
+          echo "Uploading metrics to s3://$S3_BUCKET/$MODEL_DIR/model_metrics.json"
+          aws s3 cp model_metrics.json s3://$S3_BUCKET/$MODEL_DIR/model_metrics.json
+          
+          # Create output deployment file
+          cat > deployment_output.json << EOF
+          {
+            "Deployed": true,
+            "ModelName": "gan-model-${ENVIRONMENT}",
+            "EndpointName": "gan-ep-${ENVIRONMENT}",
+            "TrainingJob": "$LATEST_TRAINING_JOB",
+            "ModelArtifacts": "$MODEL_ARTIFACTS",
+            "MetricsLocation": "s3://$S3_BUCKET/$MODEL_DIR/model_metrics.json"
+          }
+          EOF
+        else
+          cat > deployment_output.json << EOF
+          {
+            "Deployed": false,
+            "Reason": "No model artifacts or deployment failed."
+          }
+          EOF
+        fi
+        - echo "Deployment stage complete."
 
 artifacts:
   files:
