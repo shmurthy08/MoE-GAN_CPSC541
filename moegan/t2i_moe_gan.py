@@ -273,30 +273,30 @@ class BayesianRouter(nn.Module):
         self.text_dim = text_dim
         self.num_experts = num_experts
         
-        # Feature projection with smaller initialization
+        # Feature projection with much smaller initialization
         self.feature_mu = nn.Parameter(torch.Tensor(feature_dim, 128))
-        # Use smaller standard deviation for initialization
-        nn.init.normal_(self.feature_mu, mean=0.0, std=0.01)
-        # Initialize rho to a value corresponding to lower initial variance
-        self.feature_rho = nn.Parameter(torch.Tensor(feature_dim, 128).fill_(-4.0))
+        # Use much smaller standard deviation for initialization
+        nn.init.normal_(self.feature_mu, mean=0.0, std=0.001)  # Changed from 0.01 to 0.001
+        # Initialize rho to a value corresponding to even lower initial variance
+        self.feature_rho = nn.Parameter(torch.Tensor(feature_dim, 128).fill_(-6.0))  # Changed from -4.0 to -6.0
         
-        # Text projection with smaller initialization
+        # Text projection with much smaller initialization
         self.text_mu = nn.Parameter(torch.Tensor(text_dim, 128))
-        nn.init.normal_(self.text_mu, mean=0.0, std=0.01)
-        self.text_rho = nn.Parameter(torch.Tensor(text_dim, 128).fill_(-4.0))
+        nn.init.normal_(self.text_mu, mean=0.0, std=0.001)  # Changed from 0.01 to 0.001
+        self.text_rho = nn.Parameter(torch.Tensor(text_dim, 128).fill_(-6.0))  # Changed from -4.0 to -6.0
         
-        # Combined projection to expert logits with smaller initialization
+        # Combined projection to expert logits with much smaller initialization
         self.combined_mu = nn.Parameter(torch.Tensor(256, num_experts))
-        nn.init.normal_(self.combined_mu, mean=0.0, std=0.01)
-        self.combined_rho = nn.Parameter(torch.Tensor(256, num_experts).fill_(-4.0))
-        
+        nn.init.normal_(self.combined_mu, mean=0.0, std=0.001)  # Changed from 0.01 to 0.001
+        self.combined_rho = nn.Parameter(torch.Tensor(256, num_experts).fill_(-6.0))  # Changed from -4.0 to -6.0
+
         # Noise for sampling
         self.register_buffer('epsilon_f', torch.zeros(feature_dim, 128))
         self.register_buffer('epsilon_t', torch.zeros(text_dim, 128))
         self.register_buffer('epsilon_c', torch.zeros(256, num_experts))
         
         # Temperature parameter - start with higher value for less sharp distributions
-        self.temperature = nn.Parameter(torch.ones(1) * 3.0)
+        self.temperature = nn.Parameter(torch.ones(1) * 4.0)
     def reparameterize(self, mu, rho, epsilon=None):
         """Numerically stable reparameterization with debugging"""
         # Debug input values
@@ -1161,8 +1161,11 @@ def train_aurora_gan(
         
         # Calculate KL annealing factor 
         # Starts very low and increases over kl_annealing_epochs
-        kl_warmup_factor = min(1.0, epoch / kl_annealing_epochs)
-        effective_kl_weight = kl_weight * kl_warmup_factor
+        kl_warmup_factor = min(1.0, (epoch / kl_annealing_epochs)**2)
+        # Start with an extremely small value (1e-5) of the configured weight
+        initial_factor = 1e-5
+        actual_factor = initial_factor + (1.0 - initial_factor) * kl_warmup_factor
+        effective_kl_weight = kl_weight * actual_factor
         
         # Calculate MoE router temperature factor
         # Starts high (more uniform routing) and gradually decreases
