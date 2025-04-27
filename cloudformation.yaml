@@ -182,6 +182,115 @@ Resources:
               - !Ref SageMakerEndpoint
               - ""
 
+  ImageMetricsLambda:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      FunctionName: !Sub '${ProjectName}-${EnvironmentName}-image-metrics'
+      Role: !GetAtt LambdaRole.Arn
+      Runtime: python3.8
+      Handler: index.handler
+      Timeout: 60
+      MemorySize: 1024
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          import base64
+          
+          def handler(event, context):
+              # Get the endpoint name
+              endpoint_name = os.environ.get('SAGEMAKER_ENDPOINT_NAME', '')
+              if not endpoint_name:
+                  endpoint_name = 'gan-ep-' + os.environ.get('ENVIRONMENT', 'dev')
+              
+              try:
+                  body = json.loads(event.get('body', '{}'))
+                  text_prompt = body.get('text', '')
+                  num_samples = min(body.get('num_samples', 4), 8)
+                  
+                  if not text_prompt:
+                      return {
+                          'statusCode': 400,
+                          'headers': {'Content-Type': 'application/json'},
+                          'body': json.dumps({
+                              'error': 'Text prompt is required'
+                          })
+                      }
+                  
+                  # Call SageMaker endpoint with FID calculation enabled
+                  sagemaker_runtime = boto3.client('sagemaker-runtime')
+                  response = sagemaker_runtime.invoke_endpoint(
+                      EndpointName=endpoint_name,
+                      ContentType='application/json',
+                      Body=json.dumps({
+                          'text': text_prompt,
+                          'num_samples': num_samples,
+                          'calculate_fid': True
+                      })
+                  )
+                  
+                  result = json.loads(response['Body'].read().decode())
+                  
+                  # Add training metrics for comparison
+                  s3 = boto3.client('s3')
+                  sagemaker = boto3.client('sagemaker')
+                  
+                  # Find latest training job
+                  training_jobs = sagemaker.list_training_jobs(
+                      NameContains=os.environ.get('PROJECT_NAME', 'gan-text-to-image') + '-' + os.environ.get('ENVIRONMENT', 'dev'),
+                      SortBy='CreationTime',
+                      SortOrder='Descending',
+                      MaxResults=1
+                  )
+                  
+                  if training_jobs['TrainingJobSummaries']:
+                      training_job = training_jobs['TrainingJobSummaries'][0]['TrainingJobName']
+                      job_info = sagemaker.describe_training_job(TrainingJobName=training_job)
+                      model_artifacts = job_info['ModelArtifacts']['S3ModelArtifacts']
+                      
+                      # Extract bucket and prefix
+                      bucket = model_artifacts.split('/')[2]
+                      prefix = '/'.join(model_artifacts.split('/')[3:])
+                      model_dir = os.path.dirname(prefix)
+                      
+                      # Try to get metrics file
+                      try:
+                          metrics_key = f"{model_dir}/model_metrics.json"
+                          metrics_response = s3.get_object(
+                              Bucket=bucket,
+                              Key=metrics_key
+                          )
+                          
+                          metrics = json.loads(metrics_response['Body'].read().decode('utf-8'))
+                          result['model_metrics'] = metrics
+                      except Exception as metrics_error:
+                          print(f"Error loading metrics: {metrics_error}")
+                  
+                  return {
+                      'statusCode': 200,
+                      'headers': {'Content-Type': 'application/json'},
+                      'body': json.dumps(result)
+                  }
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'headers': {'Content-Type': 'application/json'},
+                      'body': json.dumps({
+                          'error': str(e)
+                      })
+                  }
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref EnvironmentName
+          PROJECT_NAME: !Ref ProjectName
+          SAGEMAKER_ENDPOINT_NAME: 
+            Fn::If:
+              - HasModelArtifact
+              - !Ref SageMakerEndpoint
+              - ''
+
+
   MetricsLambda:
     Type: 'AWS::Lambda::Function'
     Properties:
@@ -189,31 +298,79 @@ Resources:
       Role: !GetAtt LambdaRole.Arn
       Runtime: python3.8
       Handler: index.handler
-      Timeout: 30
+      Timeout: 60
       MemorySize: 256
       Code:
         ZipFile: |
           import json
+          import boto3
+          import os
           
           def handler(event, context):
-              # In a real implementation, you would fetch metrics from CloudWatch
-              # or another metrics store. This is a placeholder.
-              mock_metrics = {
-                  'metrics': {
-                      'fid_score': 35.7,
-                      'inception_score': 7.2,
-                      'training_loss': 1.85,
-                      'validation_loss': 2.1
-                  },
-                  'last_updated': '2023-07-10T15:30:45Z'
-              }
+              # Find the latest training job and get metrics
+              s3 = boto3.client('s3')
+              sagemaker = boto3.client('sagemaker')
               
-              return {
-                  'statusCode': 200,
-                  'headers': {'Content-Type': 'application/json'},
-                  'body': json.dumps(mock_metrics)
-              }
-
+              try:
+                  # Get the project name and environment
+                  project_name = os.environ.get('PROJECT_NAME', 'gan-text-to-image')
+                  environment = os.environ.get('ENVIRONMENT', 'dev')
+                  
+                  # Find the latest training job
+                  training_jobs = sagemaker.list_training_jobs(
+                      NameContains=f"{project_name}-{environment}",
+                      SortBy='CreationTime',
+                      SortOrder='Descending',
+                      MaxResults=1
+                  )
+                  
+                  if not training_jobs['TrainingJobSummaries']:
+                      return {
+                          'statusCode': 404,
+                          'headers': {'Content-Type': 'application/json'},
+                          'body': json.dumps({
+                              'error': 'No training jobs found.'
+                          })
+                      }
+                  
+                  training_job = training_jobs['TrainingJobSummaries'][0]['TrainingJobName']
+                  
+                  # Get the model artifacts location
+                  job_info = sagemaker.describe_training_job(TrainingJobName=training_job)
+                  model_artifacts = job_info['ModelArtifacts']['S3ModelArtifacts']
+                  
+                  # Extract bucket and prefix
+                  bucket = model_artifacts.split('/')[2]
+                  prefix = '/'.join(model_artifacts.split('/')[3:])
+                  model_dir = os.path.dirname(prefix)
+                  
+                  # Get metrics file
+                  metrics_key = f"{model_dir}/model_metrics.json"
+                  response = s3.get_object(
+                      Bucket=bucket,
+                      Key=metrics_key
+                  )
+                  
+                  metrics = json.loads(response['Body'].read().decode('utf-8'))
+                  
+                  return {
+                      'statusCode': 200,
+                      'headers': {'Content-Type': 'application/json'},
+                      'body': json.dumps(metrics)
+                  }
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'headers': {'Content-Type': 'application/json'},
+                      'body': json.dumps({
+                          'error': str(e),
+                          'message': 'Failed to retrieve model metrics'
+                      })
+                  }
+      Environment:
+        Variables:
+          PROJECT_NAME: !Ref ProjectName
+          ENVIRONMENT: !Ref EnvironmentName
   # ===== API Gateway =====
   APIGatewayRestAPI:
     Type: 'AWS::ApiGateway::RestApi'
@@ -227,6 +384,33 @@ Resources:
       RestApiId: !Ref APIGatewayRestAPI
       ParentId: !GetAtt APIGatewayRestAPI.RootResourceId
       PathPart: 'generate'
+
+  ImageMetricsResource:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      RestApiId: !Ref APIGatewayRestAPI
+      ParentId: !GetAtt APIGatewayRestAPI.RootResourceId
+      PathPart: 'image-metrics'
+
+  ImageMetricsMethod:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      RestApiId: !Ref APIGatewayRestAPI
+      ResourceId: !Ref ImageMetricsResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ImageMetricsLambda.Arn}/invocations'
+
+  ImageMetricsLambdaPermission:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref ImageMetricsLambda
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${APIGatewayRestAPI}/*/POST/image-metrics'
 
   MetricsResource:
     Type: 'AWS::ApiGateway::Resource'

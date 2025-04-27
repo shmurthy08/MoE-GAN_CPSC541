@@ -1664,8 +1664,7 @@ def train_aurora_gan(
 
 def sample_aurora_gan(generator, text_prompt, num_samples=1, truncation_psi=0.7, device=DEVICE):
     """
-    Generate images from text prompt using the Aurora GAN.
-    !! Needs adjustment for new generator return signature !!
+    Generate 16x16 images from text prompt using the Aurora GAN.
     """
     generator.eval()
 
@@ -1674,9 +1673,10 @@ def sample_aurora_gan(generator, text_prompt, num_samples=1, truncation_psi=0.7,
 
     # Generate images
     with torch.no_grad():
-        # Adjust the call to match the generator's forward method
-        # We only need the final image for sampling
-        # Assuming the non-intermediate, non-routing call returns (final_image, kl_loss)
-        fake_images, _ = generator(z, text_prompt, truncation_psi=truncation_psi, return_intermediate=False, return_routing=False) # Adjusted call
+        # Get only the final image (no need for intermediate outputs)
+        fake_images, _ = generator(z, text_prompt, truncation_psi=truncation_psi)
+        
+        # Ensure images are in correct range [-1, 1]
+        fake_images = torch.clamp(fake_images, -1, 1)
 
     return fake_images
