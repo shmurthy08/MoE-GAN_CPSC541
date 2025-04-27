@@ -78,7 +78,7 @@ phases:
         mkdir -p frontend
         
         # Create frontend HTML file
-        cat > frontend/index.html << 'EOF'
+        cat > frontend/index.html << EOF
         <!DOCTYPE html>
         <html lang="en">
         <head>
