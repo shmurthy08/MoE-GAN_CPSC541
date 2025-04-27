@@ -298,7 +298,14 @@ class BayesianRouter(nn.Module):
         # Temperature parameter - start with higher value for less sharp distributions
         self.temperature = nn.Parameter(torch.ones(1) * 3.0)
     def reparameterize(self, mu, rho, epsilon=None):
-        """Numerically stable reparameterization"""
+        """Numerically stable reparameterization with debugging"""
+        # Debug input values
+        if torch.isnan(mu).any().item() or torch.isinf(mu).any().item():
+            print(f"⚠️ NaN/Inf detected in mu before clamp: min={mu.min().item()}, max={mu.max().item()}")
+        
+        if torch.isnan(rho).any().item() or torch.isinf(rho).any().item():
+            print(f"⚠️ NaN/Inf detected in rho before clamp: min={rho.min().item()}, max={rho.max().item()}")
+            
         # Clamp mu and rho to prevent extreme values
         mu = torch.clamp(mu, min=-10.0, max=10.0)
         rho = torch.clamp(rho, min=-8.0, max=4.0)
@@ -306,16 +313,33 @@ class BayesianRouter(nn.Module):
         # More stable sigma calculation with minimum bound
         sigma = torch.clamp(torch.log1p(torch.exp(rho)), min=1e-6, max=10.0)
         
+        if torch.isnan(sigma).any().item() or torch.isinf(sigma).any().item():
+            print(f"⚠️ NaN/Inf detected in sigma: min={sigma.min().item()}, max={sigma.max().item()}")
+        
         if epsilon is None:
             epsilon = torch.randn_like(sigma)
         
         # Clamp epsilon too for more stability
         epsilon = torch.clamp(epsilon, min=-2.0, max=2.0)
         
-        return mu + sigma * epsilon
-    
+        result = mu + sigma * epsilon
+        
+        # Check for NaN/Inf in final result
+        if torch.isnan(result).any().item() or torch.isinf(result).any().item():
+            print(f"⚠️ NaN/Inf detected in reparameterize result: min={result.min().item()}, max={result.max().item()}")
+        
+        return result
+       
     def forward(self, feature, text_embedding, sampling=True, annealing_factor=1.0):
         batch_size = feature.size(0)
+        # Check inputs for NaN/Inf
+        if torch.isnan(feature).any().item() or torch.isinf(feature).any().item():
+            print(f"⚠️ NaN/Inf detected in feature input to BayesianRouter")
+            feature = torch.nan_to_num(feature, nan=0.0, posinf=1.0, neginf=-1.0)
+            
+        if torch.isnan(text_embedding).any().item() or torch.isinf(text_embedding).any().item():
+            print(f"⚠️ NaN/Inf detected in text_embedding input to BayesianRouter")
+            text_embedding = torch.nan_to_num(text_embedding, nan=0.0, posinf=1.0, neginf=-1.0)
         
         # Sample weights if in training mode
         if sampling and self.training:
@@ -1048,7 +1072,8 @@ def train_aurora_gan(
     """
     # Create save directory
     os.makedirs(save_dir, exist_ok=True)
-
+    torch.autograd.set_detect_anomaly(True)
+    print("Anomaly detection enabled - will show traceback for NaN values")
     # Memory cleanup before starting
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -1287,9 +1312,9 @@ def train_aurora_gan(
             
             # Scale the loss if using AMP
             if scaler:
-                scaler.scale(d_loss / current_accumulation_steps).backward()
+                scaler.scale(d_loss / current_accumulation_steps).backward(retain_graph=True)
             else:
-                (d_loss / current_accumulation_steps).backward()
+                (d_loss / current_accumulation_steps).backward(retain_graph=True)
             
             # Only step optimizer after accumulating gradients
             if (batch_idx + 1) % current_accumulation_steps == 0 or (batch_idx + 1) == len(dataloader):
