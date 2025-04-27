@@ -12,6 +12,8 @@ import math
 import logging
 from torch.distributions import Normal, kl_divergence
 from torch.optim.lr_scheduler import CosineAnnealingLR
+import torch.nn.utils.weight_norm as weight_norm
+
 
 
 # Constants
@@ -276,19 +278,19 @@ class BayesianRouter(nn.Module):
         # Feature projection with much smaller initialization
         self.feature_mu = nn.Parameter(torch.Tensor(feature_dim, 128))
         # Use much smaller standard deviation for initialization
-        nn.init.normal_(self.feature_mu, mean=0.0, std=0.001)  # Changed from 0.01 to 0.001
+        nn.init.normal_(self.feature_mu, mean=0.0, std=0.01)  # Changed from 0.01 to 0.001
         # Initialize rho to a value corresponding to even lower initial variance
-        self.feature_rho = nn.Parameter(torch.Tensor(feature_dim, 128).fill_(-6.0))  # Changed from -4.0 to -6.0
+        self.feature_rho = nn.Parameter(torch.Tensor(feature_dim, 128).fill_(-5.0))  # Changed from -4.0 to -6.0
         
         # Text projection with much smaller initialization
         self.text_mu = nn.Parameter(torch.Tensor(text_dim, 128))
-        nn.init.normal_(self.text_mu, mean=0.0, std=0.001)  # Changed from 0.01 to 0.001
-        self.text_rho = nn.Parameter(torch.Tensor(text_dim, 128).fill_(-6.0))  # Changed from -4.0 to -6.0
+        nn.init.normal_(self.text_mu, mean=0.0, std=0.01)  # Changed from 0.01 to 0.001
+        self.text_rho = nn.Parameter(torch.Tensor(text_dim, 128).fill_(-5.0))  # Changed from -4.0 to -6.0
         
         # Combined projection to expert logits with much smaller initialization
         self.combined_mu = nn.Parameter(torch.Tensor(256, num_experts))
-        nn.init.normal_(self.combined_mu, mean=0.0, std=0.001)  # Changed from 0.01 to 0.001
-        self.combined_rho = nn.Parameter(torch.Tensor(256, num_experts).fill_(-6.0))  # Changed from -4.0 to -6.0
+        nn.init.normal_(self.combined_mu, mean=0.0, std=0.01)  # Changed from 0.01 to 0.001
+        self.combined_rho = nn.Parameter(torch.Tensor(256, num_experts).fill_(-5.0))  # Changed from -4.0 to -6.0
 
         # Noise for sampling
         self.register_buffer('epsilon_f', torch.zeros(feature_dim, 128))
@@ -857,27 +859,26 @@ class AuroraDiscriminator(nn.Module):
         
         # Text projection
         self.text_projection = nn.Sequential(
-            nn.Linear(text_embedding_dim, 128),
+            weight_norm(nn.Linear(text_embedding_dim, 128)),
             nn.LeakyReLU(0.2, inplace=True)
         )
 
-        # Convolutional layers for 16x16 resolution only
+        # Convolutional layers for 16x16 resolution - using weight_norm instead of BatchNorm
         self.conv_layers = nn.Sequential(
             # 16x16 -> 8x8
-            nn.Conv2d(3, 128, kernel_size=4, stride=2, padding=1, bias=False),
-            nn.BatchNorm2d(128),
+            weight_norm(nn.Conv2d(3, 128, kernel_size=4, stride=2, padding=1, bias=True)),
             nn.LeakyReLU(0.2, inplace=True),
 
             # 8x8 -> 4x4
-            nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1, bias=False),
-            nn.BatchNorm2d(256),
+            weight_norm(nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1, bias=True)),
             nn.LeakyReLU(0.2, inplace=True),
         )
         
         # Output layer
         self.output_layer = nn.Sequential(
-            nn.Conv2d(256 + 128, 1, kernel_size=4, stride=1, padding=0, bias=False)
+            weight_norm(nn.Conv2d(256 + 128, 1, kernel_size=4, stride=1, padding=0, bias=True))
         )
+
 
     def forward(self, img, text_embedding):
         # Process image
