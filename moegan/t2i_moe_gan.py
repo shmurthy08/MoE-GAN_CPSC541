@@ -278,19 +278,19 @@ class BayesianRouter(nn.Module):
         # Feature projection with much smaller initialization
         self.feature_mu = nn.Parameter(torch.Tensor(feature_dim, 128))
         # Use much smaller standard deviation for initialization
-        nn.init.normal_(self.feature_mu, mean=0.0, std=0.01)  # Changed from 0.01 to 0.001
+        nn.init.normal_(self.feature_mu, mean=0.0, std=0.01)  
         # Initialize rho to a value corresponding to even lower initial variance
-        self.feature_rho = nn.Parameter(torch.Tensor(feature_dim, 128).fill_(-5.0))  # Changed from -4.0 to -6.0
+        self.feature_rho = nn.Parameter(torch.Tensor(feature_dim, 128).fill_(-4.0))  # Changed from -4.0 to -6.0
         
         # Text projection with much smaller initialization
         self.text_mu = nn.Parameter(torch.Tensor(text_dim, 128))
-        nn.init.normal_(self.text_mu, mean=0.0, std=0.01)  # Changed from 0.01 to 0.001
-        self.text_rho = nn.Parameter(torch.Tensor(text_dim, 128).fill_(-5.0))  # Changed from -4.0 to -6.0
+        nn.init.normal_(self.text_mu, mean=0.0, std=0.01)  
+        self.text_rho = nn.Parameter(torch.Tensor(text_dim, 128).fill_(-4.0))  # Changed from -4.0 to -6.0
         
         # Combined projection to expert logits with much smaller initialization
         self.combined_mu = nn.Parameter(torch.Tensor(256, num_experts))
-        nn.init.normal_(self.combined_mu, mean=0.0, std=0.01)  # Changed from 0.01 to 0.001
-        self.combined_rho = nn.Parameter(torch.Tensor(256, num_experts).fill_(-5.0))  # Changed from -4.0 to -6.0
+        nn.init.normal_(self.combined_mu, mean=0.0, std=0.01)  
+        self.combined_rho = nn.Parameter(torch.Tensor(256, num_experts).fill_(-4.0))  # Changed from -4.0 to -6.0
 
         # Noise for sampling
         self.register_buffer('epsilon_f', torch.zeros(feature_dim, 128))
@@ -930,7 +930,6 @@ class AuroraGANLoss:
 
         return self.clip_loss_fn(images, text_embeddings)
 
-    # !! MODIFIED: Added mismatched_pred !!
     def discriminator_loss(self, real_pred, fake_pred, mismatched_pred):
         # Logistic loss using softplus (numerically more stable than sigmoid+log)
         # Wants real_pred high (minimize softplus(-real_pred))
@@ -1073,8 +1072,7 @@ def train_aurora_gan(
     """
     # Create save directory
     os.makedirs(save_dir, exist_ok=True)
-    torch.autograd.set_detect_anomaly(True)
-    print("Anomaly detection enabled - will show traceback for NaN values")
+    
     # Memory cleanup before starting
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
