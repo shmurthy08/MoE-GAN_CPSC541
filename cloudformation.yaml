@@ -144,140 +144,155 @@ Resources:
           logger.setLevel(logging.INFO)
 
           def handler(event, context):
-              # Log the incoming request
-              logger.info(f"InferenceLambda received request: {json.dumps(event, default=str)}")
-              
-              # Get the endpoint name from environment variables
-              endpoint_name = os.environ.get('SAGEMAKER_ENDPOINT_NAME', '')
-              dynamodb_table = os.environ.get('DYNAMODB_TABLE', '')
-              
-              # If no endpoint exists yet, return a message
-              if not endpoint_name:
-                  logger.warning("No SageMaker endpoint configured")
-                  return {
-                      'statusCode': 200,
-                      'headers': {
-                          'Content-Type': 'application/json',
-                          'Access-Control-Allow-Origin': 'https://gan-text-to-image-dev-frontend.s3.us-east-1.amazonaws.com',
-                          'Access-Control-Allow-Headers': 'Content-Type',
-                          'Access-Control-Allow-Methods': 'OPTIONS,POST,GET'
-                      },
-                      'body': json.dumps({
-                          'message': 'Model endpoint not deployed yet. Please deploy a model first.'
-                      })
-                  }
-              
-              # Handle OPTIONS request for CORS
-              if event.get('httpMethod') == 'OPTIONS':
-                  logger.info("Handling OPTIONS request for CORS")
-                  return {
-                      'statusCode': 200,
-                      'headers': {
-                          'Content-Type': 'application/json',
-                          'Access-Control-Allow-Origin': 'https://gan-text-to-image-dev-frontend.s3.us-east-1.amazonaws.com',
-                          'Access-Control-Allow-Headers': 'Content-Type',
-                          'Access-Control-Allow-Methods': 'OPTIONS,POST,GET'
-                      },
-                      'body': json.dumps({})
-                  }
-              
-              # Get the text prompt from the request
-              try:
-                  body = json.loads(event.get('body', '{}'))
-                  text_prompt = body.get('text', '')
-                  logger.info(f"Received text prompt: {text_prompt}")
-                  
-                  if not text_prompt:
-                      logger.warning("No text prompt provided in request")
-                      return {
-                          'statusCode': 400,
-                          'headers': {
-                              'Content-Type': 'application/json',
-                              'Access-Control-Allow-Origin': 'https://gan-text-to-image-dev-frontend.s3.us-east-1.amazonaws.com',
-                              'Access-Control-Allow-Headers': 'Content-Type',
-                              'Access-Control-Allow-Methods': 'OPTIONS,POST,GET'
-                          },
-                          'body': json.dumps({
-                              'error': 'Text prompt is required in the request body.'
-                          })
-                      }
-                  
-                  # Generate a unique request ID
-                  request_id = str(uuid.uuid4())
-                  logger.info(f"Generated request_id: {request_id}")
-                  
-                  # Save the request to DynamoDB
-                  dynamodb = boto3.resource('dynamodb')
-                  table = dynamodb.Table(dynamodb_table)
-                  
-                  # Calculate expiration time (24 hours from now)
-                  expiration_time = int((datetime.now() + timedelta(hours=24)).timestamp())
-                  
-                  # Store initial job information
-                  logger.info(f"Storing initial job information in DynamoDB: {dynamodb_table}")
-                  table.put_item(
-                      Item={
-                          'request_id': request_id,
-                          'status': 'IN_PROGRESS',
-                          'prompt': text_prompt,
-                          'created_at': int(time.time()),
-                          'expiration_time': expiration_time
-                      }
-                  )
-                  
-                  # Start asynchronous invocation of SageMaker endpoint
-                  processor_lambda = os.environ.get('PROCESSOR_LAMBDA', '')
-                  logger.info(f"Invoking ProcessorLambda ({processor_lambda}) asynchronously")
-                  lambda_client = boto3.client('lambda')
-                  lambda_client.invoke(
-                      FunctionName=processor_lambda,
-                      InvocationType='Event',  # Asynchronous invocation
-                      Payload=json.dumps({
-                          'request_id': request_id,
-                          'text_prompt': text_prompt,
-                          'endpoint_name': endpoint_name
-                      })
-                  )
-                  
-                  # Return the request ID to the client
-                  logger.info(f"Returning request_id to client: {request_id}")
-                  return {
-                      'statusCode': 200,
-                      'headers': {
-                          'Content-Type': 'application/json',
-                          'Access-Control-Allow-Origin': 'https://gan-text-to-image-dev-frontend.s3.us-east-1.amazonaws.com',
-                          'Access-Control-Allow-Headers': 'Content-Type',
-                          'Access-Control-Allow-Methods': 'OPTIONS,POST,GET'
-                      },
-                      'body': json.dumps({
-                          'request_id': request_id,
-                          'status': 'IN_PROGRESS',
-                          'message': 'Image generation started. Poll for results using the request_id.'
-                      })
-                  }
-              except Exception as e:
-                  logger.error(f"Error processing request: {str(e)}")
-                  return {
-                      'statusCode': 500,
-                      'headers': {
-                          'Content-Type': 'application/json',
-                          'Access-Control-Allow-Origin': 'https://gan-text-to-image-dev-frontend.s3.us-east-1.amazonaws.com',
-                          'Access-Control-Allow-Headers': 'Content-Type',
-                          'Access-Control-Allow-Methods': 'OPTIONS,POST,GET'
-                      },
-                      'body': json.dumps({
-                          'error': str(e)
-                      })
-                  }
+            # Log the incoming request
+            logger.info(f"InferenceLambda received request: {json.dumps(event, default=str)}")
+            
+            # Hardcode endpoint name and DynamoDB table name as requested
+            endpoint_name = 'gan-ep-dev'
+            dynamodb_table = 'gan-text-to-image-dev-generation-jobs'
+            
+            # Handle OPTIONS request for CORS
+            if event.get('httpMethod') == 'OPTIONS':
+                logger.info("Handling OPTIONS request for CORS")
+                return {
+                    'statusCode': 200,
+                    'headers': {
+                        'Content-Type': 'application/json',
+                        'Access-Control-Allow-Origin': '*',  # Updated to wildcard
+                        'Access-Control-Allow-Headers': 'Content-Type',
+                        'Access-Control-Allow-Methods': 'OPTIONS,POST,GET'
+                    },
+                    'body': json.dumps({})
+                }
+            
+            # Get the text prompt from the request
+            try:
+                body = json.loads(event.get('body', '{}'))
+                text_prompt = body.get('text', '')
+                logger.info(f"Received text prompt: {text_prompt}")
+                
+                if not text_prompt:
+                    logger.warning("No text prompt provided in request")
+                    return {
+                        'statusCode': 400,
+                        'headers': {
+                            'Content-Type': 'application/json',
+                            'Access-Control-Allow-Origin': '*',  # Updated to wildcard
+                            'Access-Control-Allow-Headers': 'Content-Type',
+                            'Access-Control-Allow-Methods': 'OPTIONS,POST,GET'
+                        },
+                        'body': json.dumps({
+                            'error': 'Text prompt is required in the request body.'
+                        })
+                    }
+                
+                # Generate a unique request ID
+                request_id = str(uuid.uuid4())
+                logger.info(f"Generated request_id: {request_id}")
+                
+                # Save the request to DynamoDB
+                dynamodb = boto3.resource('dynamodb')
+                table = dynamodb.Table(dynamodb_table)
+                
+                # Calculate expiration time (24 hours from now)
+                expiration_time = int((datetime.now() + timedelta(hours=24)).timestamp())
+                
+                # Store initial job information
+                logger.info(f"Storing initial job information in DynamoDB: {dynamodb_table}")
+                table.put_item(
+                    Item={
+                        'request_id': request_id,
+                        'status': 'IN_PROGRESS',
+                        'prompt': text_prompt,
+                        'created_at': int(time.time()),
+                        'expiration_time': expiration_time
+                    }
+                )
+                
+                # Create the SageMaker async request
+                logger.info(f"Submitting async request to SageMaker endpoint: {endpoint_name}")
+                sagemaker_runtime = boto3.client('sagemaker-runtime')
+                
+                # Construct the request payload
+                request_payload = json.dumps({
+                    'text': text_prompt
+                })
+                
+                # Call SageMaker endpoint asynchronously
+                async_response = sagemaker_runtime.invoke_endpoint_async(
+                    EndpointName=endpoint_name,
+                    ContentType='application/json',
+                    Accept='application/json',
+                    InputLocation=f"s3://{os.environ.get('S3_BUCKET_NAME', 'gan-text-to-image-dev-artifacts-207567761455')}/async-inputs/{request_id}.json",
+                    RequestBody=request_payload,
+                    InvocationTimeoutSeconds=3600,
+                )
+                
+                # Get the SageMaker inference ID
+                inference_id = async_response.get('InferenceId')
+                logger.info(f"Received SageMaker InferenceId: {inference_id}")
+                
+                # Update DynamoDB with the SageMaker inference ID
+                table.update_item(
+                    Key={
+                        'request_id': request_id
+                    },
+                    UpdateExpression='SET sagemaker_inference_id = :inference_id',
+                    ExpressionAttributeValues={
+                        ':inference_id': inference_id
+                    }
+                )
+                
+                # Start a separate Lambda to check status
+                processor_lambda = os.environ.get('PROCESSOR_LAMBDA', '')
+                logger.info(f"Invoking ProcessorLambda ({processor_lambda}) asynchronously")
+                lambda_client = boto3.client('lambda')
+                lambda_client.invoke(
+                    FunctionName=processor_lambda,
+                    InvocationType='Event',  # Asynchronous invocation
+                    Payload=json.dumps({
+                        'request_id': request_id,
+                        'inference_id': inference_id,
+                        'endpoint_name': endpoint_name
+                    })
+                )
+                
+                # Return the request ID to the client
+                logger.info(f"Returning request_id to client: {request_id}")
+                return {
+                    'statusCode': 200,
+                    'headers': {
+                        'Content-Type': 'application/json',
+                        'Access-Control-Allow-Origin': '*',  # Updated to wildcard
+                        'Access-Control-Allow-Headers': 'Content-Type',
+                        'Access-Control-Allow-Methods': 'OPTIONS,POST,GET'
+                    },
+                    'body': json.dumps({
+                        'request_id': request_id,
+                        'status': 'IN_PROGRESS',
+                        'message': 'Image generation started. Poll for results using the request_id.'
+                    })
+                }
+            except Exception as e:
+                logger.error(f"Error processing request: {str(e)}")
+                return {
+                    'statusCode': 500,
+                    'headers': {
+                        'Content-Type': 'application/json',
+                        'Access-Control-Allow-Origin': '*',  # Updated to wildcard
+                        'Access-Control-Allow-Headers': 'Content-Type',
+                        'Access-Control-Allow-Methods': 'OPTIONS,POST,GET'
+                    },
+                    'body': json.dumps({
+                        'error': str(e)
+                    })
+                }
       Environment:
         Variables:
-          SAGEMAKER_ENDPOINT_NAME: 
-            Fn::If:
-              - HasModelArtifact
-              - !Ref SageMakerEndpoint
-              - ""
-          DYNAMODB_TABLE: !Ref GenerationJobsTable
+          SAGEMAKER_ENDPOINT_NAME: 'gan-ep-dev'  
+          DYNAMODB_TABLE: 'gan-text-to-image-dev-generation-jobs'  
           PROCESSOR_LAMBDA: !GetAtt ProcessorLambda.Arn
+          S3_BUCKET_NAME: !Ref ModelArtifactBucket  
 
   ProcessorLambda:
     Type: 'AWS::Lambda::Function'
@@ -301,93 +316,150 @@ Resources:
           logger.setLevel(logging.INFO)
 
           def handler(event, context):
-              # Log the incoming event
-              logger.info(f"ProcessorLambda started with request_id: {event.get('request_id')}")
-              logger.info(f"Processing text prompt: {event.get('text_prompt')}")
-              
-              # Get parameters from the event
-              request_id = event.get('request_id')
-              text_prompt = event.get('text_prompt')
-              endpoint_name = event.get('endpoint_name')
-              
-              # Initialize clients
-              sagemaker_runtime = boto3.client('sagemaker-runtime')
-              dynamodb = boto3.resource('dynamodb')
-              table = dynamodb.Table(os.environ.get('DYNAMODB_TABLE', ''))
-              
-              try:
-                  # Log the SageMaker endpoint call
-                  logger.info(f"Calling SageMaker endpoint: {endpoint_name}")
-                  start_time = time.time()
-                  
-                  # Call the SageMaker endpoint
-                  response = sagemaker_runtime.invoke_endpoint(
-                      EndpointName=endpoint_name,
-                      ContentType='application/json',
-                      Body=json.dumps({'text': text_prompt})
-                  )
-                  
-                  # Log the completion time
-                  elapsed_time = time.time() - start_time
-                  logger.info(f"SageMaker endpoint call completed in {elapsed_time:.2f} seconds")
-                  
-                  # Process the response
-                  result = json.loads(response['Body'].read().decode())
-                  logger.info(f"Received response with {len(result.get('images', []))} images")
-                  
-                  # Update the job status in DynamoDB
-                  logger.info(f"Updating DynamoDB with COMPLETED status for request_id: {request_id}")
-                  table.update_item(
-                      Key={'request_id': request_id},
-                      UpdateExpression='SET #status = :status, #data = :data, #updated_at = :updated_at',
-                      ExpressionAttributeNames={
-                          '#status': 'status',
-                          '#data': 'data',
-                          '#updated_at': 'updated_at'
-                      },
-                      ExpressionAttributeValues={
-                          ':status': 'COMPLETED',
-                          ':data': result,
-                          ':updated_at': int(time.time())
-                      }
-                  )
-                  
-                  logger.info(f"ProcessorLambda completed successfully for request_id: {request_id}")
-                  return {
-                      'statusCode': 200,
-                      'body': json.dumps({
-                          'message': 'Processing completed successfully'
-                      })
-                  }
-              except Exception as e:
-                  logger.error(f"Error processing request {request_id}: {str(e)}")
-                  
-                  # Update the job status with the error
-                  table.update_item(
-                      Key={'request_id': request_id},
-                      UpdateExpression='SET #status = :status, #error = :error, #updated_at = :updated_at',
-                      ExpressionAttributeNames={
-                          '#status': 'status',
-                          '#error': 'error',
-                          '#updated_at': 'updated_at'
-                      },
-                      ExpressionAttributeValues={
-                          ':status': 'FAILED',
-                          ':error': str(e),
-                          ':updated_at': int(time.time())
-                      }
-                  )
-                  
-                  return {
-                      'statusCode': 500,
-                      'body': json.dumps({
-                          'error': str(e)
-                      })
-                  }
+            # Log the incoming event
+            logger.info(f"ProcessorLambda started with request_id: {event.get('request_id')}")
+            
+            # Get parameters from the event
+            request_id = event.get('request_id')
+            inference_id = event.get('inference_id')
+            
+            # Hardcode endpoint name and DynamoDB table name as requested
+            endpoint_name = 'gan-ep-dev'
+            dynamodb_table = 'gan-text-to-image-dev-generation-jobs'
+            
+            # Initialize clients
+            sagemaker_runtime = boto3.client('sagemaker-runtime')
+            dynamodb = boto3.resource('dynamodb')
+            table = dynamodb.Table(dynamodb_table)
+            s3_client = boto3.client('s3')
+            
+            try:
+                # Check the status of the SageMaker async inference job
+                logger.info(f"Checking status of SageMaker async inference job: {inference_id}")
+                
+                response = sagemaker_runtime.describe_endpoint_async_inference_job(
+                    EndpointName=endpoint_name,
+                    InferenceId=inference_id
+                )
+                
+                status = response.get('Status')
+                logger.info(f"SageMaker async job status: {status}")
+                
+                if status == 'COMPLETED':
+                    # Get the result from S3
+                    output_location = response.get('OutputLocation')
+                    logger.info(f"Output location: {output_location}")
+                    
+                    # Parse S3 URI
+                    bucket_name = output_location.split('/')[2]
+                    key = '/'.join(output_location.split('/')[3:])
+                    
+                    # Download result from S3
+                    s3_response = s3_client.get_object(Bucket=bucket_name, Key=key)
+                    result_data = s3_response['Body'].read().decode('utf-8')
+                    result = json.loads(result_data)
+                    
+                    # Update the job status in DynamoDB
+                    logger.info(f"Updating DynamoDB with COMPLETED status for request_id: {request_id}")
+                    table.update_item(
+                        Key={'request_id': request_id},
+                        UpdateExpression='SET #status = :status, #data = :data, #updated_at = :updated_at',
+                        ExpressionAttributeNames={
+                            '#status': 'status',
+                            '#data': 'data',
+                            '#updated_at': 'updated_at'
+                        },
+                        ExpressionAttributeValues={
+                            ':status': 'COMPLETED',
+                            ':data': result,
+                            ':updated_at': int(time.time())
+                        }
+                    )
+                    
+                    logger.info(f"ProcessorLambda completed successfully for request_id: {request_id}")
+                    
+                elif status == 'FAILED':
+                    # Get failure reason
+                    failure_reason = response.get('FailureReason', 'Unknown failure')
+                    logger.error(f"SageMaker async job failed: {failure_reason}")
+                    
+                    # Update DynamoDB with failure information
+                    table.update_item(
+                        Key={'request_id': request_id},
+                        UpdateExpression='SET #status = :status, #error = :error, #updated_at = :updated_at',
+                        ExpressionAttributeNames={
+                            '#status': 'status',
+                            '#error': 'error',
+                            '#updated_at': 'updated_at'
+                        },
+                        ExpressionAttributeValues={
+                            ':status': 'FAILED',
+                            ':error': failure_reason,
+                            ':updated_at': int(time.time())
+                        }
+                    )
+                    
+                elif status == 'IN_PROGRESS':
+                    # Job still running, schedule another check after a delay
+                    # We'll use a recursive Lambda invocation with a delay
+                    lambda_client = boto3.client('lambda')
+                    
+                    # Update the last checked timestamp in DynamoDB
+                    table.update_item(
+                        Key={'request_id': request_id},
+                        UpdateExpression='SET last_checked = :last_checked',
+                        ExpressionAttributeValues={
+                            ':last_checked': int(time.time())
+                        }
+                    )
+                    
+                    # Wait for 10 seconds before checking again
+                    time.sleep(10)
+                    
+                    # Re-invoke this Lambda to check status again
+                    logger.info(f"Job still in progress. Re-invoking Lambda to check status later.")
+                    lambda_client.invoke(
+                        FunctionName=context.function_name,
+                        InvocationType='Event',  # Asynchronous invocation
+                        Payload=json.dumps(event)
+                    )
+                
+                return {
+                    'statusCode': 200,
+                    'body': json.dumps({
+                        'message': f'Processing job status: {status}'
+                    })
+                }
+            
+            except Exception as e:
+                logger.error(f"Error processing request {request_id}: {str(e)}")
+                
+                # Update the job status with the error
+                table.update_item(
+                    Key={'request_id': request_id},
+                    UpdateExpression='SET #status = :status, #error = :error, #updated_at = :updated_at',
+                    ExpressionAttributeNames={
+                        '#status': 'status',
+                        '#error': 'error',
+                        '#updated_at': 'updated_at'
+                    },
+                    ExpressionAttributeValues={
+                        ':status': 'FAILED',
+                        ':error': str(e),
+                        ':updated_at': int(time.time())
+                    }
+                )
+                
+                return {
+                    'statusCode': 500,
+                    'body': json.dumps({
+                        'error': str(e)
+                    })
+                }
       Environment:
         Variables:
-          DYNAMODB_TABLE: !Ref GenerationJobsTable
-
+          DYNAMODB_TABLE: 'gan-text-to-image-dev-generation-jobs'  
+          SAGEMAKER_ENDPOINT_NAME: 'gan-ep-dev'
   ImageMetricsLambda:
     Type: 'AWS::Lambda::Function'
     Properties:
@@ -425,7 +497,7 @@ Resources:
                           'statusCode': 400,
                           'headers': {
                               'Content-Type': 'application/json',
-                              'Access-Control-Allow-Origin': 'https://gan-text-to-image-dev-frontend.s3.us-east-1.amazonaws.com',
+                              'Access-Control-Allow-Origin': '*',
                               'Access-Control-Allow-Headers': 'Content-Type',
                               'Access-Control-Allow-Methods': 'OPTIONS,POST,GET'
                           },
@@ -476,7 +548,7 @@ Resources:
                       'statusCode': 200,
                       'headers': {
                           'Content-Type': 'application/json',
-                          'Access-Control-Allow-Origin': 'https://gan-text-to-image-dev-frontend.s3.us-east-1.amazonaws.com',
+                          'Access-Control-Allow-Origin': '*',
                           'Access-Control-Allow-Headers': 'Content-Type',
                           'Access-Control-Allow-Methods': 'OPTIONS,POST,GET'
                       },
@@ -491,7 +563,7 @@ Resources:
                       'statusCode': 500,
                       'headers': {
                           'Content-Type': 'application/json',
-                          'Access-Control-Allow-Origin': 'https://gan-text-to-image-dev-frontend.s3.us-east-1.amazonaws.com',
+                          'Access-Control-Allow-Origin': '*',
                           'Access-Control-Allow-Headers': 'Content-Type',
                           'Access-Control-Allow-Methods': 'OPTIONS,POST,GET'
                       },
@@ -503,12 +575,8 @@ Resources:
         Variables:
           ENVIRONMENT: !Ref EnvironmentName
           PROJECT_NAME: !Ref ProjectName
-          SAGEMAKER_ENDPOINT_NAME: 
-            Fn::If:
-              - HasModelArtifact
-              - !Ref SageMakerEndpoint
-              - ''
-          DYNAMODB_TABLE: !Ref GenerationJobsTable
+          SAGEMAKER_ENDPOINT_NAME: 'gan-ep-dev'
+          DYNAMODB_TABLE: 'gan-text-to-image-dev-generation-jobs'
           PROCESSOR_LAMBDA: !GetAtt ProcessorLambda.Arn
 
   MetricsLambda:
@@ -568,7 +636,7 @@ Resources:
                           'statusCode': 200,
                           'headers': {
                               'Content-Type': 'application/json',
-                              'Access-Control-Allow-Origin': 'https://gan-text-to-image-dev-frontend.s3.us-east-1.amazonaws.com',
+                              'Access-Control-Allow-Origin': '*',
                               'Access-Control-Allow-Headers': 'Content-Type',
                               'Access-Control-Allow-Methods': 'OPTIONS,GET,POST'
                           },
@@ -591,7 +659,7 @@ Resources:
                           'statusCode': 200,
                           'headers': {
                               'Content-Type': 'application/json',
-                              'Access-Control-Allow-Origin': 'https://gan-text-to-image-dev-frontend.s3.us-east-1.amazonaws.com',
+                              'Access-Control-Allow-Origin': '*',
                               'Access-Control-Allow-Headers': 'Content-Type',
                               'Access-Control-Allow-Methods': 'OPTIONS,GET,POST'
                           },
@@ -604,7 +672,7 @@ Resources:
                       'statusCode': 500,
                       'headers': {
                           'Content-Type': 'application/json',
-                          'Access-Control-Allow-Origin': 'https://gan-text-to-image-dev-frontend.s3.us-east-1.amazonaws.com',
+                          'Access-Control-Allow-Origin': '*',
                           'Access-Control-Allow-Headers': 'Content-Type',
                           'Access-Control-Allow-Methods': 'OPTIONS,GET,POST'
                       },
@@ -650,7 +718,7 @@ Resources:
                           'statusCode': 400,
                           'headers': {
                               'Content-Type': 'application/json',
-                              'Access-Control-Allow-Origin': 'https://gan-text-to-image-dev-frontend.s3.us-east-1.amazonaws.com',
+                              'Access-Control-Allow-Origin': '*',
                               'Access-Control-Allow-Headers': 'Content-Type',
                               'Access-Control-Allow-Methods': 'OPTIONS,GET,POST'
                           },
@@ -669,7 +737,7 @@ Resources:
                           'statusCode': 404,
                           'headers': {
                               'Content-Type': 'application/json',
-                              'Access-Control-Allow-Origin': 'https://gan-text-to-image-dev-frontend.s3.us-east-1.amazonaws.com',
+                              'Access-Control-Allow-Origin': '*',
                               'Access-Control-Allow-Headers': 'Content-Type',
                               'Access-Control-Allow-Methods': 'OPTIONS,GET,POST'
                           },
@@ -686,7 +754,7 @@ Resources:
                       'statusCode': 200,
                       'headers': {
                           'Content-Type': 'application/json',
-                          'Access-Control-Allow-Origin': 'https://gan-text-to-image-dev-frontend.s3.us-east-1.amazonaws.com',
+                          'Access-Control-Allow-Origin': '*',
                           'Access-Control-Allow-Headers': 'Content-Type',
                           'Access-Control-Allow-Methods': 'OPTIONS,GET,POST'
                       },
@@ -700,7 +768,7 @@ Resources:
                       'statusCode': 500,
                       'headers': {
                           'Content-Type': 'application/json',
-                          'Access-Control-Allow-Origin': 'https://gan-text-to-image-dev-frontend.s3.us-east-1.amazonaws.com',
+                          'Access-Control-Allow-Origin': '*',
                           'Access-Control-Allow-Headers': 'Content-Type',
                           'Access-Control-Allow-Methods': 'OPTIONS,GET,POST'
                       },
@@ -710,7 +778,7 @@ Resources:
                   }
       Environment:
         Variables:
-          DYNAMODB_TABLE: !Ref GenerationJobsTable
+          DYNAMODB_TABLE: 'gan-text-to-image-dev-generation-jobs'
 
   # ===== API Gateway =====
   APIGatewayRestAPI:
@@ -811,7 +879,7 @@ Resources:
             ResponseParameters:
               'method.response.header.Access-Control-Allow-Headers': "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
               'method.response.header.Access-Control-Allow-Methods': "'OPTIONS,POST'"
-              'method.response.header.Access-Control-Allow-Origin': "'https://gan-text-to-image-dev-frontend.s3.us-east-1.amazonaws.com'"
+              'method.response.header.Access-Control-Allow-Origin': "'*'"
         RequestTemplates:
           'application/json': '{"statusCode": 200}'
       MethodResponses:
@@ -836,7 +904,7 @@ Resources:
             ResponseParameters:
               'method.response.header.Access-Control-Allow-Headers': "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
               'method.response.header.Access-Control-Allow-Methods': "'OPTIONS,GET'"
-              'method.response.header.Access-Control-Allow-Origin': "'https://gan-text-to-image-dev-frontend.s3.us-east-1.amazonaws.com'"
+              'method.response.header.Access-Control-Allow-Origin': "'*'"
         RequestTemplates:
           'application/json': '{"statusCode": 200}'
       MethodResponses:
@@ -861,7 +929,7 @@ Resources:
             ResponseParameters:
               'method.response.header.Access-Control-Allow-Headers': "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
               'method.response.header.Access-Control-Allow-Methods': "'OPTIONS,GET'"
-              'method.response.header.Access-Control-Allow-Origin': "'https://gan-text-to-image-dev-frontend.s3.us-east-1.amazonaws.com'"
+              'method.response.header.Access-Control-Allow-Origin': "'*'"
         RequestTemplates:
           'application/json': '{"statusCode": 200}'
       MethodResponses:
@@ -884,9 +952,9 @@ Resources:
         IntegrationResponses:
           - StatusCode: 200
             ResponseParameters:
-              'method.response.header.Access-Control-Allow-Headers': "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              'method.response.header.Access-Control-Allow-Headers': "'Content-Type'"
               'method.response.header.Access-Control-Allow-Methods': "'OPTIONS,POST'"
-              'method.response.header.Access-Control-Allow-Origin': "'https://gan-text-to-image-dev-frontend.s3.us-east-1.amazonaws.com'"
+              'method.response.header.Access-Control-Allow-Origin': "'*'"
         RequestTemplates:
           'application/json': '{"statusCode": 200}'
       MethodResponses:

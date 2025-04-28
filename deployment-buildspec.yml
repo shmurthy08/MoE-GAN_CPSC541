@@ -57,10 +57,11 @@ phases:
             --tags Key=Project,Value=${PROJECT_NAME}
           
           # Create or update endpoint config
-          echo "Creating endpoint configuration..."
+          echo "Creating async endpoint configuration..."
           aws sagemaker create-endpoint-config \
             --endpoint-config-name gan-ep-config-${ENVIRONMENT} \
-              --production-variants "VariantName=AllTraffic,ModelName=gan-model-${ENVIRONMENT},InitialInstanceCount=1,InstanceType=ml.g6.xlarge" \
+            --production-variants "VariantName=AllTraffic,ModelName=gan-model-${ENVIRONMENT},InitialInstanceCount=1,InstanceType=ml.g6.xlarge" \
+            --async-inference-config "OutputConfig={S3OutputPath=s3://${PROJECT_NAME}-${ENVIRONMENT}-artifacts-${ACCOUNT_ID}/async-outputs/},ClientConfig={MaxConcurrentInvocationsPerInstance=4}" \
             --tags Key=Project,Value=${PROJECT_NAME}
           
           # Check if endpoint exists
