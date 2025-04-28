@@ -922,7 +922,7 @@ Resources:
       Principal: apigateway.amazonaws.com
       SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${APIGatewayRestAPI}/*/GET/metrics'
 
-   PollLambdaPermission:
+  PollLambdaPermission:
     Type: 'AWS::Lambda::Permission'
     Properties:
       Action: lambda:InvokeFunction
@@ -931,19 +931,19 @@ Resources:
       SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${APIGatewayRestAPI}/*/GET/poll'
 
   APIGatewayDeployment:
-  Type: 'AWS::ApiGateway::Deployment'
-  DependsOn:
-    - InferenceMethod
-    - MetricsMethod
-    - ImageMetricsMethod
-    - PollMethod
-    - InferenceOptionsMethod
-    - MetricsOptionsMethod
-    - ImageMetricsOptionsMethod
-    - PollOptionsMethod
-  Properties:
-    RestApiId: !Ref APIGatewayRestAPI
-    Description: 'Initial deployment with async support and CORS'
+    Type: 'AWS::ApiGateway::Deployment'
+    DependsOn:
+      - InferenceMethod
+      - MetricsMethod
+      - ImageMetricsMethod
+      - PollMethod
+      - InferenceOptionsMethod
+      - MetricsOptionsMethod
+      - ImageMetricsOptionsMethod
+      - PollOptionsMethod
+    Properties:
+      RestApiId: !Ref APIGatewayRestAPI
+      Description: 'Initial deployment with async support and CORS'
 
   APIGatewayStage:
     Type: 'AWS::ApiGateway::Stage'
