@@ -19,7 +19,7 @@ phases:
       # Set the specific training job we want to find
       - echo "Setting specific training job..."
       - LATEST_TRAINING_JOB="gan-train-2504270134"
-      - echo "Latest training job: $LATEST_TRAINING_JOB"
+      - echo "Latest training job:$LATEST_TRAINING_JOB"
       
       # Get model artifacts from S3 directly
       - |

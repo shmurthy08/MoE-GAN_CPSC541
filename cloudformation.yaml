@@ -130,7 +130,12 @@ Resources:
               if not endpoint_name:
                   return {
                       'statusCode': 200,
-                      'headers': {'Content-Type': 'application/json'},
+                      'headers': {
+                          'Content-Type': 'application/json',
+                          'Access-Control-Allow-Origin': 'https://gan-text-to-image-dev-frontend.s3.us-east-1.amazonaws.com',
+                          'Access-Control-Allow-Headers': 'Content-Type',
+                          'Access-Control-Allow-Methods': 'OPTIONS,POST,GET'
+                      },
                       'body': json.dumps({
                           'message': 'Model endpoint not deployed yet. Please deploy a model first.'
                       })
@@ -144,7 +149,12 @@ Resources:
                   if not text_prompt:
                       return {
                           'statusCode': 400,
-                          'headers': {'Content-Type': 'application/json'},
+                          'headers': {
+                              'Content-Type': 'application/json',
+                              'Access-Control-Allow-Origin': 'https://gan-text-to-image-dev-frontend.s3.us-east-1.amazonaws.com',
+                              'Access-Control-Allow-Headers': 'Content-Type',
+                              'Access-Control-Allow-Methods': 'OPTIONS,POST,GET'
+                          },
                           'body': json.dumps({
                               'error': 'Text prompt is required in the request body.'
                           })
@@ -163,13 +173,23 @@ Resources:
                   
                   return {
                       'statusCode': 200,
-                      'headers': {'Content-Type': 'application/json'},
+                      'headers': {
+                          'Content-Type': 'application/json',
+                          'Access-Control-Allow-Origin': 'https://gan-text-to-image-dev-frontend.s3.us-east-1.amazonaws.com',
+                          'Access-Control-Allow-Headers': 'Content-Type',
+                          'Access-Control-Allow-Methods': 'OPTIONS,POST,GET'
+                      },
                       'body': json.dumps(result)
                   }
               except Exception as e:
                   return {
                       'statusCode': 500,
-                      'headers': {'Content-Type': 'application/json'},
+                      'headers': {
+                          'Content-Type': 'application/json',
+                          'Access-Control-Allow-Origin': 'https://gan-text-to-image-dev-frontend.s3.us-east-1.amazonaws.com',
+                          'Access-Control-Allow-Headers': 'Content-Type',
+                          'Access-Control-Allow-Methods': 'OPTIONS,POST,GET'
+                      },
                       'body': json.dumps({
                           'error': str(e)
                       })
@@ -212,7 +232,12 @@ Resources:
                   if not text_prompt:
                       return {
                           'statusCode': 400,
-                          'headers': {'Content-Type': 'application/json'},
+                          'headers': {
+                              'Content-Type': 'application/json',
+                              'Access-Control-Allow-Origin': 'https://gan-text-to-image-dev-frontend.s3.us-east-1.amazonaws.com',
+                              'Access-Control-Allow-Headers': 'Content-Type',
+                              'Access-Control-Allow-Methods': 'OPTIONS,POST,GET'
+                          },
                           'body': json.dumps({
                               'error': 'Text prompt is required'
                           })
@@ -237,13 +262,8 @@ Resources:
                   sagemaker = boto3.client('sagemaker')
                   
                   # Find latest training job
-                  training_jobs = sagemaker.list_training_jobs(
-                      NameContains=os.environ.get('PROJECT_NAME', 'gan-text-to-image') + '-' + os.environ.get('ENVIRONMENT', 'dev'),
-                      SortBy='CreationTime',
-                      SortOrder='Descending',
-                      MaxResults=1
-                  )
-                  
+                  training_job = "gan-train-2504270134"
+
                   if training_jobs['TrainingJobSummaries']:
                       training_job = training_jobs['TrainingJobSummaries'][0]['TrainingJobName']
                       job_info = sagemaker.describe_training_job(TrainingJobName=training_job)
@@ -269,13 +289,23 @@ Resources:
                   
                   return {
                       'statusCode': 200,
-                      'headers': {'Content-Type': 'application/json'},
+                      'headers': {
+                          'Content-Type': 'application/json',
+                          'Access-Control-Allow-Origin': 'https://gan-text-to-image-dev-frontend.s3.us-east-1.amazonaws.com',
+                          'Access-Control-Allow-Headers': 'Content-Type',
+                          'Access-Control-Allow-Methods': 'OPTIONS,POST,GET'
+                      },
                       'body': json.dumps(result)
                   }
               except Exception as e:
                   return {
                       'statusCode': 500,
-                      'headers': {'Content-Type': 'application/json'},
+                      'headers': {
+                          'Content-Type': 'application/json',
+                          'Access-Control-Allow-Origin': 'https://gan-text-to-image-dev-frontend.s3.us-east-1.amazonaws.com',
+                          'Access-Control-Allow-Headers': 'Content-Type',
+                          'Access-Control-Allow-Methods': 'OPTIONS,POST,GET'
+                      },
                       'body': json.dumps({
                           'error': str(e)
                       })
@@ -317,17 +347,18 @@ Resources:
                   environment = os.environ.get('ENVIRONMENT', 'dev')
                   
                   # Find the latest training job
-                  training_jobs = sagemaker.list_training_jobs(
-                      NameContains=f"{project_name}-{environment}",
-                      SortBy='CreationTime',
-                      SortOrder='Descending',
-                      MaxResults=1
-                  )
+                  training_job = "gan-train-2504270134"
+
                   
                   if not training_jobs['TrainingJobSummaries']:
                       return {
                           'statusCode': 404,
-                          'headers': {'Content-Type': 'application/json'},
+                          'headers': {
+                              'Content-Type': 'application/json',
+                              'Access-Control-Allow-Origin': 'https://gan-text-to-image-dev-frontend.s3.us-east-1.amazonaws.com',
+                              'Access-Control-Allow-Headers': 'Content-Type',
+                              'Access-Control-Allow-Methods': 'OPTIONS,POST,GET'
+                          },
                           'body': json.dumps({
                               'error': 'No training jobs found.'
                           })
@@ -355,13 +386,23 @@ Resources:
                   
                   return {
                       'statusCode': 200,
-                      'headers': {'Content-Type': 'application/json'},
+                      'headers': {
+                          'Content-Type': 'application/json',
+                          'Access-Control-Allow-Origin': 'https://gan-text-to-image-dev-frontend.s3.us-east-1.amazonaws.com',
+                          'Access-Control-Allow-Headers': 'Content-Type',
+                          'Access-Control-Allow-Methods': 'OPTIONS,POST,GET'
+                      },
                       'body': json.dumps(metrics)
                   }
               except Exception as e:
                   return {
                       'statusCode': 500,
-                      'headers': {'Content-Type': 'application/json'},
+                      'headers': {
+                          'Content-Type': 'application/json',
+                          'Access-Control-Allow-Origin': 'https://gan-text-to-image-dev-frontend.s3.us-east-1.amazonaws.com',
+                          'Access-Control-Allow-Headers': 'Content-Type',
+                          'Access-Control-Allow-Methods': 'OPTIONS,POST,GET'
+                      },
                       'body': json.dumps({
                           'error': str(e),
                           'message': 'Failed to retrieve model metrics'
