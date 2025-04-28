@@ -51,6 +51,13 @@ ENTRYPOINT ["python", "/app/moegan/sagemaker_train.py"]
 # Inference stage
 FROM base as inference
 
+# Install Java and inference-specific dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        openjdk-11-jre-headless && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
 # Install inference-specific dependencies
 RUN pip install --no-cache-dir \
     flask \
@@ -63,6 +70,8 @@ RUN pip install --no-cache-dir \
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app:/app/data_processing:/app/scripts:/app/moegan
+ENV JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
+
 
 # Create serving script
 RUN echo '#!/usr/bin/env python3\n\
