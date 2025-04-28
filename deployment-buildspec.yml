@@ -86,7 +86,7 @@ phases:
           
           # Update CloudFormation stack with model artifacts and container info
           aws cloudformation update-stack \
-            --stack-name ${PROJECT_NAME}-${ENVIRONMENT} \
+            --stack-name STACKMOEGAN
             --use-previous-template \
             --parameters \
               ParameterKey=ModelArtifactUrl,ParameterValue=$MODEL_ARTIFACTS \
