@@ -127,7 +127,7 @@ Resources:
       Role: !GetAtt LambdaRole.Arn
       Runtime: python3.8
       Handler: index.handler
-      Timeout: 30
+      Timeout: 500
       MemorySize: 256
       Code:
         ZipFile: |
@@ -224,7 +224,6 @@ Resources:
                     ContentType='application/json',
                     Accept='application/json',
                     InputLocation=f"s3://{os.environ.get('S3_BUCKET_NAME', 'gan-text-to-image-dev-artifacts-207567761455')}/async-inputs/{request_id}.json",
-                    RequestBody=request_payload,
                     InvocationTimeoutSeconds=3600,
                 )
                 
@@ -301,7 +300,7 @@ Resources:
       Role: !GetAtt LambdaRole.Arn
       Runtime: python3.8
       Handler: index.handler
-      Timeout: 300  # 5 minutes
+      Timeout: 900  # Increased timeout for long-running tasks
       MemorySize: 512
       Code:
         ZipFile: |
@@ -326,9 +325,11 @@ Resources:
             # Hardcode endpoint name and DynamoDB table name as requested
             endpoint_name = 'gan-ep-dev'
             dynamodb_table = 'gan-text-to-image-dev-generation-jobs'
+            s3_bucket_name = 'gan-text-to-image-dev-artifacts-207567761455'
             
             # Initialize clients
             sagemaker_runtime = boto3.client('sagemaker-runtime')
+            sagemaker = boto3.client('sagemaker')  # Regular SageMaker client, not runtime
             dynamodb = boto3.resource('dynamodb')
             table = dynamodb.Table(dynamodb_table)
             s3_client = boto3.client('s3')
@@ -337,99 +338,141 @@ Resources:
                 # Check the status of the SageMaker async inference job
                 logger.info(f"Checking status of SageMaker async inference job: {inference_id}")
                 
-                response = sagemaker_runtime.describe_endpoint_async_inference_job(
-                    EndpointName=endpoint_name,
-                    InferenceId=inference_id
+                # Using the correct API call to check async inference job status
+                response = sagemaker.describe_inference_recommendations_job(
+                    JobName=inference_id
                 )
                 
-                status = response.get('Status')
-                logger.info(f"SageMaker async job status: {status}")
+                # Log the full response for debugging
+                logger.info(f"SageMaker response: {json.dumps(response, default=str)}")
                 
-                if status == 'COMPLETED':
-                    # Get the result from S3
-                    output_location = response.get('OutputLocation')
-                    logger.info(f"Output location: {output_location}")
-                    
-                    # Parse S3 URI
-                    bucket_name = output_location.split('/')[2]
-                    key = '/'.join(output_location.split('/')[3:])
-                    
-                    # Download result from S3
-                    s3_response = s3_client.get_object(Bucket=bucket_name, Key=key)
-                    result_data = s3_response['Body'].read().decode('utf-8')
-                    result = json.loads(result_data)
-                    
-                    # Update the job status in DynamoDB
-                    logger.info(f"Updating DynamoDB with COMPLETED status for request_id: {request_id}")
-                    table.update_item(
-                        Key={'request_id': request_id},
-                        UpdateExpression='SET #status = :status, #data = :data, #updated_at = :updated_at',
-                        ExpressionAttributeNames={
-                            '#status': 'status',
-                            '#data': 'data',
-                            '#updated_at': 'updated_at'
-                        },
-                        ExpressionAttributeValues={
-                            ':status': 'COMPLETED',
-                            ':data': result,
-                            ':updated_at': int(time.time())
-                        }
-                    )
-                    
-                    logger.info(f"ProcessorLambda completed successfully for request_id: {request_id}")
-                    
-                elif status == 'FAILED':
-                    # Get failure reason
-                    failure_reason = response.get('FailureReason', 'Unknown failure')
-                    logger.error(f"SageMaker async job failed: {failure_reason}")
-                    
-                    # Update DynamoDB with failure information
-                    table.update_item(
-                        Key={'request_id': request_id},
-                        UpdateExpression='SET #status = :status, #error = :error, #updated_at = :updated_at',
-                        ExpressionAttributeNames={
-                            '#status': 'status',
-                            '#error': 'error',
-                            '#updated_at': 'updated_at'
-                        },
-                        ExpressionAttributeValues={
-                            ':status': 'FAILED',
-                            ':error': failure_reason,
-                            ':updated_at': int(time.time())
-                        }
-                    )
-                    
-                elif status == 'IN_PROGRESS':
-                    # Job still running, schedule another check after a delay
-                    # We'll use a recursive Lambda invocation with a delay
-                    lambda_client = boto3.client('lambda')
-                    
-                    # Update the last checked timestamp in DynamoDB
-                    table.update_item(
-                        Key={'request_id': request_id},
-                        UpdateExpression='SET last_checked = :last_checked',
-                        ExpressionAttributeValues={
-                            ':last_checked': int(time.time())
-                        }
-                    )
-                    
-                    # Wait for 10 seconds before checking again
-                    time.sleep(10)
-                    
-                    # Re-invoke this Lambda to check status again
-                    logger.info(f"Job still in progress. Re-invoking Lambda to check status later.")
-                    lambda_client.invoke(
-                        FunctionName=context.function_name,
-                        InvocationType='Event',  # Asynchronous invocation
-                        Payload=json.dumps(event)
-                    )
+                # Alternative approach - check output S3 location directly
+                output_prefix = f"async-outputs/{inference_id}"
+                logger.info(f"Checking S3 for output at: {s3_bucket_name}/{output_prefix}")
                 
-                return {
-                    'statusCode': 200,
-                    'body': json.dumps({
-                        'message': f'Processing job status: {status}'
-                    })
-                }
+                # List objects in the output prefix
+                try:
+                    s3_response = s3_client.list_objects_v2(
+                        Bucket=s3_bucket_name,
+                        Prefix=output_prefix,
+                        MaxKeys=1
+                    )
+                    
+                    # Check if any output file exists
+                    if 'Contents' in s3_response and len(s3_response['Contents']) > 0:
+                        # Output file exists, get the first one
+                        output_key = s3_response['Contents'][0]['Key']
+                        logger.info(f"Found output file: {output_key}")
+                        
+                        # Get the output file
+                        object_response = s3_client.get_object(
+                            Bucket=s3_bucket_name,
+                            Key=output_key
+                        )
+                        
+                        result_data = object_response['Body'].read().decode('utf-8')
+                        result = json.loads(result_data)
+                        
+                        # Update DynamoDB with completed status
+                        logger.info(f"Updating DynamoDB with COMPLETED status for request_id: {request_id}")
+                        table.update_item(
+                            Key={'request_id': request_id},
+                            UpdateExpression='SET #status = :status, #data = :data, #updated_at = :updated_at',
+                            ExpressionAttributeNames={
+                                '#status': 'status',
+                                '#data': 'data',
+                                '#updated_at': 'updated_at'
+                            },
+                            ExpressionAttributeValues={
+                                ':status': 'COMPLETED',
+                                ':data': result,
+                                ':updated_at': int(time.time())
+                            }
+                        )
+                        
+                        logger.info(f"ProcessorLambda completed successfully for request_id: {request_id}")
+                        return {
+                            'statusCode': 200,
+                            'body': json.dumps({
+                                'message': 'Processing completed successfully'
+                            })
+                        }
+                    else:
+                        # No output file yet, check for error file
+                        error_prefix = f"async-outputs/{inference_id}/error"
+                        s3_error_response = s3_client.list_objects_v2(
+                            Bucket=s3_bucket_name,
+                            Prefix=error_prefix,
+                            MaxKeys=1
+                        )
+                        
+                        if 'Contents' in s3_error_response and len(s3_error_response['Contents']) > 0:
+                            # Error file exists, job failed
+                            error_key = s3_error_response['Contents'][0]['Key']
+                            logger.error(f"Found error file: {error_key}")
+                            
+                            # Get the error file
+                            error_object = s3_client.get_object(
+                                Bucket=s3_bucket_name,
+                                Key=error_key
+                            )
+                            
+                            error_data = error_object['Body'].read().decode('utf-8')
+                            
+                            # Update DynamoDB with failed status
+                            table.update_item(
+                                Key={'request_id': request_id},
+                                UpdateExpression='SET #status = :status, #error = :error, #updated_at = :updated_at',
+                                ExpressionAttributeNames={
+                                    '#status': 'status',
+                                    '#error': 'error',
+                                    '#updated_at': 'updated_at'
+                                },
+                                ExpressionAttributeValues={
+                                    ':status': 'FAILED',
+                                    ':error': error_data,
+                                    ':updated_at': int(time.time())
+                                }
+                            )
+                            
+                            return {
+                                'statusCode': 200,
+                                'body': json.dumps({
+                                    'message': 'Processing failed'
+                                })
+                            }
+                        else:
+                            # No output or error file yet, job still in progress
+                            # Update the last checked timestamp in DynamoDB
+                            table.update_item(
+                                Key={'request_id': request_id},
+                                UpdateExpression='SET last_checked = :last_checked',
+                                ExpressionAttributeValues={
+                                    ':last_checked': int(time.time())
+                                }
+                            )
+                            
+                            # Wait before re-checking
+                            time.sleep(5)
+                            
+                            # Re-invoke this Lambda to check status again
+                            logger.info(f"Job still in progress. Re-invoking Lambda to check status later.")
+                            lambda_client = boto3.client('lambda')
+                            lambda_client.invoke(
+                                FunctionName=context.function_name,
+                                InvocationType='Event',  # Asynchronous invocation
+                                Payload=json.dumps(event)
+                            )
+                            
+                            return {
+                                'statusCode': 200,
+                                'body': json.dumps({
+                                    'message': 'Processing still in progress'
+                                })
+                            }
+                except Exception as s3_error:
+                    logger.error(f"Error checking S3: {str(s3_error)}")
+                    # Fall back to regular status check
             
             except Exception as e:
                 logger.error(f"Error processing request {request_id}: {str(e)}")
@@ -456,6 +499,21 @@ Resources:
                         'error': str(e)
                     })
                 }
+
+            # Final fallback - if we couldn't determine status, check again later
+            lambda_client = boto3.client('lambda')
+            lambda_client.invoke(
+                FunctionName=context.function_name,
+                InvocationType='Event',
+                Payload=json.dumps(event)
+            )
+            
+            return {
+                'statusCode': 200,
+                'body': json.dumps({
+                    'message': 'Status check in progress'
+                })
+            }
       Environment:
         Variables:
           DYNAMODB_TABLE: 'gan-text-to-image-dev-generation-jobs'  
@@ -467,7 +525,7 @@ Resources:
       Role: !GetAtt LambdaRole.Arn
       Runtime: python3.8
       Handler: index.handler
-      Timeout: 60
+      Timeout: 600
       MemorySize: 512  # Reduced from 1024 to save costs
       Code:
         ZipFile: |
@@ -694,8 +752,8 @@ Resources:
       Role: !GetAtt LambdaRole.Arn
       Runtime: python3.8
       Handler: index.handler
-      Timeout: 30
-      MemorySize: 128  # Reduced to 128MB to save costs
+      Timeout: 750
+      MemorySize: 256  # Reduced to 128MB to save costs
       Code:
         ZipFile: |
           import json
@@ -877,7 +935,7 @@ Resources:
         IntegrationResponses:
           - StatusCode: 200
             ResponseParameters:
-              'method.response.header.Access-Control-Allow-Headers': "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              'method.response.header.Access-Control-Allow-Headers': "'Content-Type'"
               'method.response.header.Access-Control-Allow-Methods': "'OPTIONS,POST'"
               'method.response.header.Access-Control-Allow-Origin': "'*'"
         RequestTemplates:
@@ -902,7 +960,7 @@ Resources:
         IntegrationResponses:
           - StatusCode: 200
             ResponseParameters:
-              'method.response.header.Access-Control-Allow-Headers': "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              'method.response.header.Access-Control-Allow-Headers': "'Content-Type'"
               'method.response.header.Access-Control-Allow-Methods': "'OPTIONS,GET'"
               'method.response.header.Access-Control-Allow-Origin': "'*'"
         RequestTemplates:
@@ -927,7 +985,7 @@ Resources:
         IntegrationResponses:
           - StatusCode: 200
             ResponseParameters:
-              'method.response.header.Access-Control-Allow-Headers': "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              'method.response.header.Access-Control-Allow-Headers': "'Content-Type'"
               'method.response.header.Access-Control-Allow-Methods': "'OPTIONS,GET'"
               'method.response.header.Access-Control-Allow-Origin': "'*'"
         RequestTemplates:
