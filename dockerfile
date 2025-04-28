@@ -57,6 +57,7 @@ RUN pip install --no-cache-dir \
     gunicorn \
     pillow \
     boto3 \
+    multi-model-server \
     sagemaker-inference
 
 # Set environment variables
