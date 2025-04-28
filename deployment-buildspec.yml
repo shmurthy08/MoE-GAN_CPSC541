@@ -16,18 +16,18 @@ phases:
       - PROJECT_NAME=$(cat cloudformation.yaml | grep -m 1 'ProjectName' -A 3 | grep 'Default:' | awk '{print $2}')
       - ENVIRONMENT=$(cat cloudformation.yaml | grep -m 1 'EnvironmentName' -A 3 | grep 'Default:' | awk '{print $2}')
       
-      # Find latest training job
-      - echo "Finding latest training job..."
-      - LATEST_TRAINING_JOB=$(aws sagemaker list-training-jobs --name-contains ${PROJECT_NAME}-${ENVIRONMENT} --sort-by CreationTime --sort-order Descending --query "TrainingJobSummaries[0].TrainingJobName" --output text)
-      - echo "Latest training job:$LATEST_TRAINING_JOB"
+      # Set the specific training job we want to find
+      - echo "Setting specific training job..."
+      - LATEST_TRAINING_JOB="gan-train-2504270134"
+      - echo "Latest training job: $LATEST_TRAINING_JOB"
       
-      # Get model artifacts
+      # Get model artifacts from S3 directly
       - |
         if [ ! -z "$LATEST_TRAINING_JOB" ]; then
-          MODEL_ARTIFACTS=$(aws sagemaker describe-training-job --training-job-name $LATEST_TRAINING_JOB --query 'ModelArtifacts.S3ModelArtifacts' --output text)
+          MODEL_ARTIFACTS="s3://gan-text-to-image-dev-artifacts-207567761455/training/gan-train-2504270134/gan-train-2504270134/output/model.tar.gz"
           echo "Model artifacts: $MODEL_ARTIFACTS"
         else
-          echo "No training jobs found. Skipping deployment."
+          echo "No training job specified. Skipping deployment."
           exit 0
         fi
       
@@ -98,14 +98,13 @@ phases:
           echo "Missing model artifacts or inference image. Skipping deployment."
         fi
   
-  # Add this in the post_build phase of deployment-buildspec.yml
   post_build:
     commands:
       # Create metrics file and upload to S3
       - |
         if [ ! -z "$LATEST_TRAINING_JOB" ] && [ ! -z "$MODEL_ARTIFACTS" ]; then
           # Create metrics JSON file
-          cat > model_metrics.json << EOF
+          cat > model_metrics.json << -EOF
           {
             "model_id": "$LATEST_TRAINING_JOB",
             "training_date": "$(date +%Y-%m-%d)",
@@ -141,7 +140,7 @@ phases:
           aws s3 cp model_metrics.json s3://$S3_BUCKET/$MODEL_DIR/model_metrics.json
           
           # Create output deployment file
-          cat > deployment_output.json << EOF
+          cat > deployment_output.json << -EOF
           {
             "Deployed": true,
             "ModelName": "gan-model-${ENVIRONMENT}",
@@ -152,14 +151,14 @@ phases:
           }
           EOF
         else
-          cat > deployment_output.json << EOF
+          cat > deployment_output.json <<-EOF
           {
             "Deployed": false,
             "Reason": "No model artifacts or deployment failed."
           }
           EOF
         fi
-        - echo "Deployment stage complete."
+      - echo "Deployment stage complete."
 
 artifacts:
   files:
