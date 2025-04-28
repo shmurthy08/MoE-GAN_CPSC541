@@ -99,60 +99,60 @@ phases:
         fi
   
   post_build:
-  commands:
-    - |
-      if [ ! -z "$LATEST_TRAINING_JOB" ] && [ ! -z "$MODEL_ARTIFACTS" ]; then
-        echo "Creating model_metrics.json..."
-        printf '{
-        "model_id": "%s",
-        "training_date": "%s",
-        "hyperparameters": {
-          "balance_weight": 0.006488147350209087,
-          "batch_size": 9,
-          "beta1": 0.882075398724864,
-          "beta2": 0.9385630453882949,
-          "clip_weight_16": 0.19197351204230995,
-          "clip_weight_8": 0.04016935445931133,
-          "epochs": 50,
-          "kl_annealing_epochs": 20,
-          "kl_weight": 0.0006752514413805058,
-          "learning_rate": 0.000671592452618617,
-          "r1_gamma": 9.66634402753149
-        },
-        "validation_metrics": {
-          "d_loss": 1.9575,
-          "g_loss": 0.8320,
-          "clip_loss_16": 0.8099,
-          "clip_loss_8": 0.8128
-        },
-        "description": "16x16 resolution GAN model trained for 50 epochs"
-      }' "$LATEST_TRAINING_JOB" "$(date +%Y-%m-%d)" > model_metrics.json
+    commands:
+      - |
+        if [ ! -z "$LATEST_TRAINING_JOB" ] && [ ! -z "$MODEL_ARTIFACTS" ]; then
+          echo "Creating model_metrics.json..."
+          printf '{
+          "model_id": "%s",
+          "training_date": "%s",
+          "hyperparameters": {
+            "balance_weight": 0.006488147350209087,
+            "batch_size": 9,
+            "beta1": 0.882075398724864,
+            "beta2": 0.9385630453882949,
+            "clip_weight_16": 0.19197351204230995,
+            "clip_weight_8": 0.04016935445931133,
+            "epochs": 50,
+            "kl_annealing_epochs": 20,
+            "kl_weight": 0.0006752514413805058,
+            "learning_rate": 0.000671592452618617,
+            "r1_gamma": 9.66634402753149
+          },
+          "validation_metrics": {
+            "d_loss": 1.9575,
+            "g_loss": 0.8320,
+            "clip_loss_16": 0.8099,
+            "clip_loss_8": 0.8128
+          },
+          "description": "16x16 resolution GAN model trained for 50 epochs"
+        }' "$LATEST_TRAINING_JOB" "$(date +%Y-%m-%d)" > model_metrics.json
 
-              S3_BUCKET=$(echo $MODEL_ARTIFACTS | cut -d'/' -f3)
-              MODEL_PREFIX=$(echo $MODEL_ARTIFACTS | cut -d'/' -f4-)
-              MODEL_DIR=$(dirname $MODEL_PREFIX)
+                S3_BUCKET=$(echo $MODEL_ARTIFACTS | cut -d'/' -f3)
+                MODEL_PREFIX=$(echo $MODEL_ARTIFACTS | cut -d'/' -f4-)
+                MODEL_DIR=$(dirname $MODEL_PREFIX)
 
-              echo "Uploading metrics file to S3..."
-              aws s3 cp model_metrics.json s3://$S3_BUCKET/$MODEL_DIR/model_metrics.json
+                echo "Uploading metrics file to S3..."
+                aws s3 cp model_metrics.json s3://$S3_BUCKET/$MODEL_DIR/model_metrics.json
 
-              echo "Creating deployment_output.json..."
-              printf '{
-        "Deployed": true,
-        "ModelName": "gan-model-%s",
-        "EndpointName": "gan-ep-%s",
-        "TrainingJob": "%s",
-        "ModelArtifacts": "%s",
-        "MetricsLocation": "s3://%s/%s/model_metrics.json"
-      }' "$ENVIRONMENT" "$ENVIRONMENT" "$LATEST_TRAINING_JOB" "$MODEL_ARTIFACTS" "$S3_BUCKET" "$MODEL_DIR" > deployment_output.json
-            else
-              echo "Deployment failed, creating fallback deployment_output.json"
-              printf '{
-        "Deployed": false,
-        "Reason": "No model artifacts or deployment failed."
-      }' > deployment_output.json
-            fi
+                echo "Creating deployment_output.json..."
+                printf '{
+          "Deployed": true,
+          "ModelName": "gan-model-%s",
+          "EndpointName": "gan-ep-%s",
+          "TrainingJob": "%s",
+          "ModelArtifacts": "%s",
+          "MetricsLocation": "s3://%s/%s/model_metrics.json"
+        }' "$ENVIRONMENT" "$ENVIRONMENT" "$LATEST_TRAINING_JOB" "$MODEL_ARTIFACTS" "$S3_BUCKET" "$MODEL_DIR" > deployment_output.json
+              else
+                echo "Deployment failed, creating fallback deployment_output.json"
+                printf '{
+          "Deployed": false,
+          "Reason": "No model artifacts or deployment failed."
+        }' > deployment_output.json
+              fi
 
-          - echo "Deployment stage complete."
+            - echo "Deployment stage complete."
 
 
 
