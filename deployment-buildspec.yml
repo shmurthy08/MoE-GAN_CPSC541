@@ -84,16 +84,6 @@ phases:
           
           echo "Deployment initiated. Endpoint will be available at: ${PROJECT_NAME}-${ENVIRONMENT}-endpoint"
           
-          # Update CloudFormation stack with model artifacts and container info
-          aws cloudformation update-stack \
-            --stack-name STACKMOEGAN
-            --use-previous-template \
-            --parameters \
-              ParameterKey=ModelArtifactUrl,ParameterValue=$MODEL_ARTIFACTS \
-              ParameterKey=ContainerImage,ParameterValue=$INFERENCE_IMAGE_URI \
-              ParameterKey=ProjectName,UsePreviousValue=true \
-              ParameterKey=EnvironmentName,UsePreviousValue=true \
-            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM
         else
           echo "Missing model artifacts or inference image. Skipping deployment."
         fi
