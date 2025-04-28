@@ -142,7 +142,7 @@ phases:
         }' > deployment_output.json
               fi
 
-            - echo "Deployment stage complete."
+      - echo "Deployment stage complete."
 
 
 
