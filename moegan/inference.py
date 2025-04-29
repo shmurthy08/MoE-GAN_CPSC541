@@ -6,7 +6,7 @@ import base64
 from io import BytesIO
 import numpy as np
 from PIL import Image
-from t2i_moe_gan import AuroraGenerator, sample_aurora_gan
+from moegan.t2i_moe_gan import AuroraGenerator, sample_aurora_gan
 
 # Constants
 LATENT_DIM = 512
