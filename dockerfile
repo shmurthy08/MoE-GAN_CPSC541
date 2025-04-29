@@ -25,6 +25,13 @@ RUN pip install --no-cache-dir -r requirements.txt && \
 RUN pip install --no-deps git+https://github.com/openai/CLIP.git && \
     pip install --no-deps ftfy regex tqdm
 
+# Create proper Python package structure
+RUN mkdir -p /app/moegan /app/data_processing
+
+# Create __init__.py files to make directories proper Python packages
+RUN echo "from .t2i_moe_gan import AuroraGenerator, sample_aurora_gan" > /app/moegan/__init__.py
+RUN touch /app/data_processing/__init__.py
+
 # Copy common code files
 COPY moegan/*.py /app/moegan/
 COPY data_processing/*.py /app/data_processing/
@@ -38,12 +45,11 @@ RUN pip install --no-cache-dir \
 
 # Copy training-specific files
 COPY scripts/*.py /app/scripts/
+RUN mkdir -p /app/scripts && touch /app/scripts/__init__.py
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
-ENV PYTHONPATH=/app:/app/data_processing:/app/scripts::/app/moegan
-
-
+ENV PYTHONPATH=/app:/app/data_processing:/app/scripts:/app/moegan
 
 # Set entry point
 ENTRYPOINT ["python", "/app/moegan/sagemaker_train.py"]
@@ -51,11 +57,13 @@ ENTRYPOINT ["python", "/app/moegan/sagemaker_train.py"]
 # Inference stage
 FROM base as inference
 
-COPY moegan/inference.py /app/inference.py
+# Keep inference.py within package structure
+# DO NOT copy to /app/inference.py as in original
+# This ensures imports work correctly
 
 RUN pip install --no-cache-dir \
-scipy \
-torchvision
+    scipy \
+    torchvision
 
 # Install Java and inference-specific dependencies
 RUN apt-get update && \
@@ -78,14 +86,12 @@ ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app:/app/data_processing:/app/scripts:/app/moegan
 ENV JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
 
-
-# Create serving script
+# IMPORTANT: Update handler service name to use correct module path
 RUN echo '#!/usr/bin/env python3\n\
 from sagemaker_inference import model_server\n\
 \n\
-# 1) "inference" is the module name (i.e. /app/inference.py)\n\
-# 2) You have copied inference.py into /app, which is on PYTHONPATH\n\
-model_server.start_model_server(handler_service="inference")' \
+# Use moegan.inference instead of inference\n\
+model_server.start_model_server(handler_service="moegan.inference")' \
 > /app/serve && chmod +x /app/serve
 
 ENTRYPOINT ["/app/serve"]
