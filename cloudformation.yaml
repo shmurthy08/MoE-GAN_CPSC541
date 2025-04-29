@@ -493,16 +493,11 @@ Resources:
             try:
                 # Check the status of the SageMaker async inference job
                 logger.info(f"Checking status of SageMaker async inference job: {inference_id}")
-                
-                # Using the correct API call to check async inference job status
-                response = sagemaker.describe_inference_recommendations_job(
-                    JobName=inference_id
-                )
-                
+                             
                 # Log the full response for debugging
                 logger.info(f"SageMaker response: {json.dumps(response, default=str)}")
                 
-                # Alternative approach - check output S3 location directly
+                # Check output S3 location directly
                 output_prefix = f"async-outputs/{inference_id}"
                 logger.info(f"Checking S3 for output at: {s3_bucket_name}/{output_prefix}")
                 
