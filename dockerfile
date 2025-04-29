@@ -51,6 +51,12 @@ ENTRYPOINT ["python", "/app/moegan/sagemaker_train.py"]
 # Inference stage
 FROM base as inference
 
+COPY moegan/inference.py /app/inference.py
+
+RUN pip install --no-cache-dir \
+scipy \
+torchvision
+
 # Install Java and inference-specific dependencies
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -75,10 +81,11 @@ ENV JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
 
 # Create serving script
 RUN echo '#!/usr/bin/env python3\n\
-import sys\n\
-import os\n\
 from sagemaker_inference import model_server\n\
-model_server.start_model_server(handler_service="/app/moegan/inference.py")' > /app/serve && \
-chmod +x /app/serve
+\n\
+# 1) "inference" is the module name (i.e. /app/inference.py)\n\
+# 2) You have copied inference.py into /app, which is on PYTHONPATH\n\
+model_server.start_model_server(handler_service="inference")' \
+> /app/serve && chmod +x /app/serve
 
 ENTRYPOINT ["/app/serve"]

@@ -18,48 +18,51 @@ model = None
 
 def load_model():
     """Load the model from the saved checkpoint"""
-    global model
-    if model is None:
-        print(f"Loading model from: {MODEL_PATH}")
-        checkpoint_path = os.path.join(MODEL_PATH, 'aurora_model_final.pt')
-        
-        # Check if model file exists
-        if os.path.exists(checkpoint_path):
-            checkpoint = torch.load(checkpoint_path, map_location=DEVICE)
-            # Initialize with max_resolution=16 explicitly
-            model = AuroraGenerator(max_resolution=16).to(DEVICE)
+    try:
+        global model
+        if model is None:
+            print(f"Loading model from: {MODEL_PATH}")
+            checkpoint_path = os.path.join(MODEL_PATH, 'aurora_model_final.pt')
             
-            # Load model weights
-            if 'generator' in checkpoint:
-                model.load_state_dict(checkpoint['generator'])
+            # Check if model file exists
+            if os.path.exists(checkpoint_path):
+                checkpoint = torch.load(checkpoint_path, map_location=DEVICE)
+                # Initialize with max_resolution=16 explicitly
+                model = AuroraGenerator(max_resolution=16).to(DEVICE)
+                
+                # Load model weights
+                if 'generator' in checkpoint:
+                    model.load_state_dict(checkpoint['generator'])
+                else:
+                    model.load_state_dict(checkpoint)
+                    
+                model.eval()
+                print("Model loaded successfully")
             else:
-                model.load_state_dict(checkpoint)
+                # Try to find any .pt file
+                for file in os.listdir(MODEL_PATH):
+                    if file.endswith('.pt'):
+                        alt_path = os.path.join(MODEL_PATH, file)
+                        print(f"Loading alternative model: {alt_path}")
+                        checkpoint = torch.load(alt_path, map_location=DEVICE)
+                        model = AuroraGenerator().to(DEVICE)
+                        
+                        # Load model weights
+                        if 'generator' in checkpoint:
+                            model.load_state_dict(checkpoint['generator'])
+                        else:
+                            model.load_state_dict(checkpoint)
+                        
+                        model.eval()
+                        break
                 
-            model.eval()
-            print("Model loaded successfully")
-        else:
-            # Try to find any .pt file
-            for file in os.listdir(MODEL_PATH):
-                if file.endswith('.pt'):
-                    alt_path = os.path.join(MODEL_PATH, file)
-                    print(f"Loading alternative model: {alt_path}")
-                    checkpoint = torch.load(alt_path, map_location=DEVICE)
-                    model = AuroraGenerator().to(DEVICE)
+                if model is None:
+                    raise FileNotFoundError(f"No model file found in {MODEL_PATH}")
+                return model
+    except Exception as e:
+        print(f"Error loading model: {e}")
+        raise e
                     
-                    # Load model weights
-                    if 'generator' in checkpoint:
-                        model.load_state_dict(checkpoint['generator'])
-                    else:
-                        model.load_state_dict(checkpoint)
-                    
-                    model.eval()
-                    break
-            
-            if model is None:
-                raise FileNotFoundError(f"No model file found in {MODEL_PATH}")
-                
-    return model
-
 # SageMaker inference handlers
 def model_fn(model_dir):
     """
