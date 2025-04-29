@@ -7,6 +7,9 @@ from io import BytesIO
 import numpy as np
 from PIL import Image
 from moegan.t2i_moe_gan import AuroraGenerator, sample_aurora_gan
+from sagemaker_inference.default_handler_service import DefaultHandlerService
+from sagemaker_inference.transformer import Transformer
+from sagemaker_inference import default_inference_handler
 
 # Constants
 LATENT_DIM = 512
@@ -254,3 +257,32 @@ def transform_fn(model, request_body, content_type, accept_type):
     
     except Exception as e:
         return json.dumps({"error": str(e)}), 'application/json', 500
+    
+
+
+# Define a simple Custom Handler using your functions
+class CustomInferenceHandler(default_inference_handler.DefaultInferenceHandler):
+    def model_fn(self, model_dir):
+        return model_fn(model_dir)
+    
+    def input_fn(self, input_data, content_type):
+        return input_data  # input is already JSON
+    
+    def predict_fn(self, input_object, model):
+        return transform_fn(model, input_object, 'application/json', 'application/json')[0]
+
+    def output_fn(self, prediction, accept):
+        return prediction
+
+# Create a transformer with our custom handler
+transformer = Transformer(default_inference_handler=CustomInferenceHandler())
+
+# Create a service that MMS expects
+_service = DefaultHandlerService(transformer=transformer)
+
+def handle(data, context):
+    if data is None:
+        return None
+    if isinstance(data, (bytes, bytearray)):
+        data = data.decode('utf-8')
+    return _service.handle(data, context)

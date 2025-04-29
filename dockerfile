@@ -91,7 +91,7 @@ RUN echo '#!/usr/bin/env python3\n\
 from sagemaker_inference import model_server\n\
 \n\
 # Use moegan.inference instead of inference\n\
-model_server.start_model_server(handler_service="moegan.inference")' \
+model_server.start_model_server(handler_service="moegan.inference:handle")' \
 > /app/serve && chmod +x /app/serve
 
 ENTRYPOINT ["/app/serve"]
