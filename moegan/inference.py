@@ -6,6 +6,8 @@ import base64
 from io import BytesIO
 import numpy as np
 from PIL import Image
+import traceback
+import sys
 from moegan.t2i_moe_gan import AuroraGenerator, sample_aurora_gan
 from sagemaker_inference.default_handler_service import DefaultHandlerService
 from sagemaker_inference.transformer import Transformer
@@ -24,48 +26,97 @@ def load_model():
     try:
         global model
         if model is None:
-            print(f"Loading model from: {MODEL_PATH}")
+            print(f"[LOAD_MODEL] Loading model from: {MODEL_PATH}")
+            
+            # List directory contents for debugging
+            print(f"[LOAD_MODEL] MODEL_PATH contents: {os.listdir(MODEL_PATH)}")
+            
             checkpoint_path = os.path.join(MODEL_PATH, 'aurora_model_final.pt')
             
             # Check if model file exists
             if os.path.exists(checkpoint_path):
+                print(f"[LOAD_MODEL] Loading checkpoint from default path: {checkpoint_path}")
                 checkpoint = torch.load(checkpoint_path, map_location=DEVICE)
                 # Initialize with max_resolution=16 explicitly
                 model = AuroraGenerator(max_resolution=16).to(DEVICE)
                 
                 # Load model weights
                 if 'generator' in checkpoint:
+                    print("[LOAD_MODEL] Loading weights from 'generator' key")
                     model.load_state_dict(checkpoint['generator'])
                 else:
+                    print("[LOAD_MODEL] Loading weights directly")
                     model.load_state_dict(checkpoint)
                     
                 model.eval()
-                print("Model loaded successfully")
+                print("[LOAD_MODEL] Model loaded successfully from default path")
             else:
                 # Try to find any .pt file
+                print("[LOAD_MODEL] Default model not found, searching for alternatives...")
+                found_model = False
                 for file in os.listdir(MODEL_PATH):
                     if file.endswith('.pt'):
                         alt_path = os.path.join(MODEL_PATH, file)
-                        print(f"Loading alternative model: {alt_path}")
+                        print(f"[LOAD_MODEL] Loading alternative model: {alt_path}")
                         checkpoint = torch.load(alt_path, map_location=DEVICE)
-                        model = AuroraGenerator().to(DEVICE)
+                        model = AuroraGenerator(max_resolution=16).to(DEVICE)
                         
                         # Load model weights
                         if 'generator' in checkpoint:
+                            print("[LOAD_MODEL] Loading weights from 'generator' key")
                             model.load_state_dict(checkpoint['generator'])
                         else:
+                            print("[LOAD_MODEL] Loading weights directly")
                             model.load_state_dict(checkpoint)
                         
                         model.eval()
+                        found_model = True
+                        print(f"[LOAD_MODEL] Alternative model loaded successfully from {alt_path}")
                         break
                 
-                if model is None:
-                    raise FileNotFoundError(f"No model file found in {MODEL_PATH}")
-                return model
-    except Exception as e:
-        print(f"Error loading model: {e}")
-        raise e
+                if not found_model:
+                    # Search subdirectories
+                    print("[LOAD_MODEL] Searching subdirectories for model files...")
+                    for root, dirs, files in os.walk(MODEL_PATH):
+                        for file in files:
+                            if file.endswith('.pt'):
+                                alt_path = os.path.join(root, file)
+                                print(f"[LOAD_MODEL] Found model in subdirectory: {alt_path}")
+                                checkpoint = torch.load(alt_path, map_location=DEVICE)
+                                model = AuroraGenerator(max_resolution=16).to(DEVICE)
+                                
+                                # Load model weights
+                                if 'generator' in checkpoint:
+                                    print("[LOAD_MODEL] Loading weights from 'generator' key")
+                                    model.load_state_dict(checkpoint['generator'])
+                                else:
+                                    print("[LOAD_MODEL] Loading weights directly")
+                                    model.load_state_dict(checkpoint)
+                                
+                                model.eval()
+                                found_model = True
+                                print(f"[LOAD_MODEL] Model from subdirectory loaded successfully")
+                                break
+                        if found_model:
+                            break
                     
+                    if not found_model:
+                        print(f"[LOAD_MODEL] ERROR: No model file found in {MODEL_PATH} or subdirectories")
+                        raise FileNotFoundError(f"No model file found in {MODEL_PATH}")
+        
+        # Verify model is not None
+        if model is None:
+            print("[LOAD_MODEL] ERROR: Model is still None after loading attempt")
+            raise ValueError("Model is still None after loading attempt")
+            
+        print(f"[LOAD_MODEL] Returning model of type: {type(model)}")
+        return model  # CRITICAL: Always return the model!
+            
+    except Exception as e:
+        print(f"[LOAD_MODEL] ERROR loading model: {e}")
+        traceback.print_exc(file=sys.stdout)
+        raise e
+
 # SageMaker inference handlers
 def model_fn(model_dir):
     """
@@ -73,7 +124,18 @@ def model_fn(model_dir):
     """
     global MODEL_PATH
     MODEL_PATH = model_dir
-    return load_model()
+    print(f"[MODEL_FN] Called with model_dir: {model_dir}")
+    
+    # Load and return the model
+    loaded_model = load_model()
+    
+    # Verify loaded model
+    if loaded_model is None:
+        print("[MODEL_FN] ERROR: model_fn failed - model is None")
+        raise ValueError("Model loading failed - returned None")
+        
+    print(f"[MODEL_FN] Returning loaded model of type: {type(loaded_model)}")
+    return loaded_model
 
 def calculate_fid_for_inference(generated_images, device=DEVICE):
     """
@@ -191,25 +253,52 @@ def transform_fn(model, request_body, content_type, accept_type):
     """
     Transform function for SageMaker inference with FID score calculation
     """
+    print(f"[TRANSFORM_FN] Called with content_type: {content_type}, accept_type: {accept_type}")
+    
+    # Verify model is not None
+    if model is None:
+        error_msg = "Model is None in transform_fn! Model loading failed."
+        print(f"[TRANSFORM_FN] ERROR: {error_msg}")
+        return json.dumps({"error": error_msg}), 'application/json', 500
+    
+    # Check model has expected attributes
+    if not hasattr(model, 'eval') or not callable(getattr(model, 'eval')):
+        error_msg = f"Model lacks eval() method. Model type: {type(model)}"
+        print(f"[TRANSFORM_FN] ERROR: {error_msg}")
+        return json.dumps({"error": error_msg}), 'application/json', 500
+    
+    # Ensure model is in eval mode
+    try:
+        model.eval()
+        print("[TRANSFORM_FN] Model successfully set to eval mode")
+    except Exception as e:
+        error_msg = f"Error calling model.eval(): {str(e)}"
+        print(f"[TRANSFORM_FN] ERROR: {error_msg}")
+        traceback.print_exc(file=sys.stdout)
+        return json.dumps({"error": error_msg}), 'application/json', 500
+    
     if content_type != 'application/json':
         return json.dumps({"error": "Expected application/json content type"}), 'application/json', 415
     
     # Parse request
-    request = json.loads(request_body)
-    text_prompt = request.get('text', '')
-    
-    if not text_prompt:
-        return json.dumps({"error": "Text prompt is required"}), 'application/json', 400
-    
-    # Number of images to generate (limit to 4 max)
-    num_samples = min(request.get('num_samples', 1), 4)
-    truncation_psi = request.get('truncation_psi', 0.7)
-    
-    # Option to calculate FID
-    calculate_fid = request.get('calculate_fid', False)
-    
     try:
+        request = json.loads(request_body)
+        text_prompt = request.get('text', '')
+        
+        print(f"[TRANSFORM_FN] Request parsed successfully. Text prompt: {text_prompt[:50]}...")
+        
+        if not text_prompt:
+            return json.dumps({"error": "Text prompt is required"}), 'application/json', 400
+        
+        # Number of images to generate (limit to 4 max)
+        num_samples = min(request.get('num_samples', 1), 4)
+        truncation_psi = request.get('truncation_psi', 0.7)
+        
+        # Option to calculate FID
+        calculate_fid = request.get('calculate_fid', False)
+        
         # Generate images
+        print(f"[TRANSFORM_FN] Generating {num_samples} images with truncation_psi={truncation_psi}")
         images = sample_aurora_gan(
             model, 
             text_prompt, 
@@ -218,16 +307,21 @@ def transform_fn(model, request_body, content_type, accept_type):
             device=DEVICE
         )
         
+        print(f"[TRANSFORM_FN] Images generated successfully. Shape: {images.shape}")
+        
         # Calculate FID if requested
         fid_score = None
         if calculate_fid and num_samples >= 2:  # Need at least a few samples for meaningful FID
             try:
+                print("[TRANSFORM_FN] Calculating FID score...")
                 fid_score = calculate_fid_for_inference(images)
-                print(f"FID Score: {fid_score}")
+                print(f"[TRANSFORM_FN] FID Score: {fid_score}")
             except Exception as fid_error:
-                print(f"Failed to calculate FID: {fid_error}")
+                print(f"[TRANSFORM_FN] Failed to calculate FID: {fid_error}")
+                traceback.print_exc(file=sys.stdout)
         
         # Convert to base64 encoded PNGs
+        print("[TRANSFORM_FN] Converting images to base64...")
         encoded_images = []
         for i in range(images.size(0)):
             # Convert to numpy array in correct format
@@ -253,25 +347,52 @@ def transform_fn(model, request_body, content_type, accept_type):
         if fid_score is not None:
             response["fid_score"] = float(fid_score)
         
+        print("[TRANSFORM_FN] Response created successfully")
         return json.dumps(response), 'application/json', 200
     
     except Exception as e:
-        return json.dumps({"error": str(e)}), 'application/json', 500
+        error_msg = f"Error processing request: {str(e)}"
+        print(f"[TRANSFORM_FN] ERROR: {error_msg}")
+        traceback.print_exc(file=sys.stdout)
+        return json.dumps({"error": error_msg}), 'application/json', 500
     
 
 
 # Define a simple Custom Handler using your functions
 class CustomInferenceHandler(default_inference_handler.DefaultInferenceHandler):
     def model_fn(self, model_dir):
-        return model_fn(model_dir)
+        print(f"[CUSTOM_HANDLER] model_fn called with model_dir: {model_dir}")
+        loaded_model = model_fn(model_dir)
+        print(f"[CUSTOM_HANDLER] model_fn returned model of type: {type(loaded_model)}")
+        return loaded_model
     
     def input_fn(self, input_data, content_type):
+        print(f"[CUSTOM_HANDLER] input_fn called with content_type: {content_type}")
         return input_data  # input is already JSON
     
     def predict_fn(self, input_object, model):
+        print(f"[CUSTOM_HANDLER] predict_fn called with model of type: {type(model)}")
+        
+        # Verify model is not None
+        if model is None:
+            error_msg = "Model is None in predict_fn! Model loading failed."
+            print(f"[CUSTOM_HANDLER] ERROR: {error_msg}")
+            return json.dumps({"error": error_msg})
+            
+        # Need to call eval again here - important for MMS handling
+        try:
+            model.eval()
+            print("[CUSTOM_HANDLER] Model successfully set to eval mode in predict_fn")
+        except Exception as e:
+            error_msg = f"Error calling model.eval() in predict_fn: {str(e)}"
+            print(f"[CUSTOM_HANDLER] ERROR: {error_msg}")
+            traceback.print_exc(file=sys.stdout)
+            return json.dumps({"error": error_msg})
+        
         return transform_fn(model, input_object, 'application/json', 'application/json')[0]
 
     def output_fn(self, prediction, accept):
+        print(f"[CUSTOM_HANDLER] output_fn called with accept: {accept}")
         return prediction
 
 # Create a transformer with our custom handler
@@ -281,8 +402,20 @@ transformer = Transformer(default_inference_handler=CustomInferenceHandler())
 _service = DefaultHandlerService(transformer=transformer)
 
 def handle(data, context):
+    print(f"[HANDLE] Called with data type: {type(data)}")
     if data is None:
+        print("[HANDLE] WARNING: Input data is None")
         return None
     if isinstance(data, (bytes, bytearray)):
         data = data.decode('utf-8')
-    return _service.handle(data, context)
+        print(f"[HANDLE] Decoded data from bytes, length: {len(data)}")
+    
+    try:
+        result = _service.handle(data, context)
+        print(f"[HANDLE] Request handled successfully, result length: {len(result) if result else 0}")
+        return result
+    except Exception as e:
+        error_msg = f"Error in handle function: {str(e)}"
+        print(f"[HANDLE] ERROR: {error_msg}")
+        traceback.print_exc(file=sys.stdout)
+        return [json.dumps({"error": error_msg})], content_types.JSON, 500
