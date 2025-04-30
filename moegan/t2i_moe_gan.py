@@ -59,7 +59,7 @@ def encode_text_with_clip(text):
     if isinstance(text, str):
         text = [text]
     with torch.no_grad():
-        text_tokens = clip.tokenize(text).to(model.device)
+        text_tokens = clip.tokenize(text).to(DEVICE)
         text_embeddings = model.encode_text(text_tokens)
     return text_embeddings
 
