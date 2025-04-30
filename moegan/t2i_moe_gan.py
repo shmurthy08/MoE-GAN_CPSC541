@@ -1668,15 +1668,25 @@ def sample_aurora_gan(generator, text_prompt, num_samples=1, truncation_psi=0.7,
     """
     generator.eval()
 
-    # Sample random noise
-    z = torch.randn(num_samples, LATENT_DIM, device=device)
+    # Sample random noise with explicit float32 type
+    z = torch.randn(num_samples, LATENT_DIM, device=device, dtype=torch.float32)
+
+    # Process text embeddings to ensure they're float32
+    if isinstance(text_prompt, str) or (isinstance(text_prompt, list) and isinstance(text_prompt[0], str)):
+        # If text string, encode and convert to float32
+        with torch.no_grad():
+            model, _ = get_clip_model()
+            if isinstance(text_prompt, str):
+                text_prompt = [text_prompt]
+            text_tokens = clip.tokenize(text_prompt).to(device)
+            text_prompt = model.encode_text(text_tokens).float()  # Explicit conversion to float32
+    elif torch.is_tensor(text_prompt):
+        # If already tensor, ensure it's float32
+        text_prompt = text_prompt.float()
 
     # Generate images
     with torch.no_grad():
-        # Get only the final image (no need for intermediate outputs)
         fake_images, _ = generator(z, text_prompt, truncation_psi=truncation_psi)
-        
-        # Ensure images are in correct range [-1, 1]
         fake_images = torch.clamp(fake_images, -1, 1)
 
     return fake_images
