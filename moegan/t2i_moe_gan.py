@@ -761,7 +761,7 @@ class AuroraGenerator(nn.Module):
             return block_fn(x, w, text_seq, kl_losses, annealing_factor)
     
     def forward(self, z, text_input, truncation_psi=0.7, return_routing=False, 
-                return_intermediate=False, annealing_factor=1.0):
+            return_intermediate=False, annealing_factor=1.0):
         """
         Forward pass with temperature annealing support for MoE layers.
         Limited to 16x16 resolution.
@@ -777,6 +777,15 @@ class AuroraGenerator(nn.Module):
         batch_size = z.size(0)
 
         text_embeddings = self.encode_text(text_input)
+        
+        # SAFEGUARD: Ensure text_embeddings has the same batch size as z
+        if text_embeddings.size(0) != batch_size:
+            if text_embeddings.size(0) == 1:
+                # If we have a single text embedding, repeat it to match batch size
+                text_embeddings = text_embeddings.repeat(batch_size, 1)
+            else:
+                # If there's a more complex mismatch, raise a more informative error
+                raise ValueError(f"Batch size mismatch: z has batch size {batch_size}, but text_embeddings has batch size {text_embeddings.size(0)}")
 
         # Process text sequence for attention layers - keep the full dimension
         text_seq = self.text_projection(text_embeddings).unsqueeze(1)  # [B, 1, D]
@@ -845,7 +854,6 @@ class AuroraGenerator(nn.Module):
             return final_image, intermediate_image, kl_loss
         else:
             return final_image, kl_loss
-
 
 
 class AuroraDiscriminator(nn.Module):
@@ -1679,10 +1687,22 @@ def sample_aurora_gan(generator, text_prompt, num_samples=1, truncation_psi=0.7,
             if isinstance(text_prompt, str):
                 text_prompt = [text_prompt]
             text_tokens = clip.tokenize(text_prompt).to(device)
-            text_prompt = model.encode_text(text_tokens).float()  # Explicit conversion to float32
+            text_embeds = model.encode_text(text_tokens).float()  # Explicit conversion to float32
+            
+            # KEY FIX: If generating multiple samples but only have one text embedding,
+            # replicate the embedding to match the number of samples
+            if num_samples > 1 and text_embeds.size(0) == 1:
+                text_embeds = text_embeds.repeat(num_samples, 1)
+            
+            text_prompt = text_embeds
     elif torch.is_tensor(text_prompt):
         # If already tensor, ensure it's float32
         text_prompt = text_prompt.float()
+        
+        # KEY FIX: If generating multiple samples but only have one text embedding,
+        # replicate the embedding to match the number of samples
+        if num_samples > 1 and text_prompt.size(0) == 1:
+            text_prompt = text_prompt.repeat(num_samples, 1)
 
     # Generate images
     with torch.no_grad():
