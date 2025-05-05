@@ -737,7 +737,8 @@ Resources:
           import uuid
           import boto3
           import logging
-          from datetime import datetime
+          import time
+          from datetime import datetime, timedelta
 
           # Setup logging
           logger = logging.getLogger()
@@ -754,68 +755,252 @@ Resources:
           BUCKET_NAME = os.environ['S3_BUCKET_NAME']
 
           def handler(event, context):
-              logger.info(f"[ImageMetricsLambda] Event: {json.dumps(event)}")
-
+              # Setup logging
+              logger.info(f"[ImageMetricsLambda] Event: {json.dumps(event, default=str)}")
+              
+              # Handle OPTIONS request for CORS
+              if event.get('httpMethod') == 'OPTIONS':
+                  logger.info("[ImageMetricsLambda] Handling OPTIONS request for CORS")
+                  return {
+                      'statusCode': 200,
+                      'headers': cors_headers(),
+                      'body': json.dumps({})
+                  }
+              
+              # Environment variables
+              table_name = os.environ.get('DYNAMODB_TABLE', 'gan-text-to-image-dev-generation-jobs')
+              endpoint_name = os.environ.get('SAGEMAKER_ENDPOINT_NAME', 'gan-ep-dev')
+              bucket_name = os.environ.get('S3_BUCKET_NAME', 'gan-text-to-image-dev-artifacts-207567761455')
+              
               try:
-                  # Extract values from event
-                  request_id = event['request_id']
-                  text_prompt = event['text']
-                  num_samples = event.get('num_samples', 2)
-
-                  logger.info(f"[ImageMetricsLambda] Starting FID request for request_id={request_id}")
-
-                  # Upload S3 input payload
-                  input_key = f"async-inputs/fid-{request_id}.json"
+                  # Parse the request body
+                  body = json.loads(event.get('body', '{}'))
+                  text_prompt = body.get('text', '')
+                  
+                  # Validate text prompt
+                  if not text_prompt:
+                      logger.warning("[ImageMetricsLambda] No text prompt provided")
+                      return {
+                          'statusCode': 400,
+                          'headers': cors_headers(),
+                          'body': json.dumps({'error': 'Text prompt is required'})
+                      }
+                  
+                  # Generate a unique request ID
+                  timestamp = int(time.time())
+                  request_id = f"fid-{timestamp}-{uuid.uuid4().hex[:8]}"
+                  logger.info(f"[ImageMetricsLambda] Generated request_id: {request_id}")
+                  
+                  # Number of samples (2-4 is good for FID calculation)
+                  # SageMaker can handle 2 concurrent, so limit to 2 if needed
+                  num_samples = min(body.get('num_samples', 2), 4)  # Limit to max 4
+                  
+                  # Create initial DynamoDB entry
+                  dynamodb = boto3.resource('dynamodb')
+                  table = dynamodb.Table(table_name)
+                  
+                  # Calculate expiration time (24 hours from now)
+                  expiration_time = int((datetime.now() + timedelta(hours=24)).timestamp())
+                  
+                  # Store initial job information
+                  logger.info(f"[ImageMetricsLambda] Storing initial job in DynamoDB: {table_name}")
+                  table.put_item(
+                      Item={
+                          'request_id': request_id,
+                          'status': 'INITIALIZING',
+                          'prompt': text_prompt,
+                          'num_samples': num_samples,
+                          'calculate_fid': True,
+                          'created_at': timestamp,
+                          'expiration_time': expiration_time
+                      }
+                  )
+                  
+                  # Create S3 input payload
+                  input_key = f"async-inputs/{request_id}.json"
+                  s3_input_path = f"s3://{bucket_name}/{input_key}"
+                  
+                  # Prepare payload for SageMaker
                   payload = {
                       "text": text_prompt,
                       "num_samples": num_samples,
-                      "calculate_fid": True
+                      "calculate_fid": True,
+                      "request_id": request_id
                   }
-
-                  s3.put_object(
-                      Bucket=BUCKET_NAME,
+                  
+                  # Upload to S3
+                  s3_client = boto3.client('s3')
+                  logger.info(f"[ImageMetricsLambda] Uploading payload to S3: {s3_input_path}")
+                  s3_client.put_object(
+                      Bucket=bucket_name,
                       Key=input_key,
                       Body=json.dumps(payload),
                       ContentType='application/json'
                   )
-                  logger.info(f"[ImageMetricsLambda] Uploaded FID payload to s3://{BUCKET_NAME}/{input_key}")
-
-                  # Invoke SageMaker endpoint asynchronously
-                  response = sagemaker_runtime.invoke_endpoint_async(
-                      EndpointName=ENDPOINT_NAME,
-                      ContentType='application/json',
-                      Accept='application/json',
-                      InputLocation=f"s3://{BUCKET_NAME}/{input_key}"
-                  )
-                  inference_id = response.get('InferenceId')
-                  logger.info(f"[ImageMetricsLambda] FID invocation submitted: inference_id={inference_id}")
-
-                  # Update DynamoDB with inference ID
-                  table = dynamodb.Table(TABLE_NAME)
-                  table.update_item(
-                      Key={'request_id': request_id},
-                      UpdateExpression="SET fid_inference_id = :fid, updated_at = :now",
-                      ExpressionAttributeValues={
-                          ":fid": inference_id,
-                          ":now": datetime.utcnow().isoformat()
+                  
+                  # Verify S3 upload
+                  try:
+                      s3_client.head_object(
+                          Bucket=bucket_name,
+                          Key=input_key
+                      )
+                      logger.info(f"[ImageMetricsLambda] Successfully verified S3 upload")
+                      
+                      # Update DynamoDB with S3 path
+                      table.update_item(
+                          Key={'request_id': request_id},
+                          UpdateExpression='SET #status = :status, #s3_path = :s3_path',
+                          ExpressionAttributeNames={
+                              '#status': 'status',
+                              '#s3_path': 's3_input_path'
+                          },
+                          ExpressionAttributeValues={
+                              ':status': 'UPLOADED',
+                              ':s3_path': s3_input_path
+                          }
+                      )
+                  except Exception as verify_error:
+                      logger.error(f"[ImageMetricsLambda] Failed to verify S3 upload: {str(verify_error)}")
+                      raise Exception(f"Upload verification failed: {str(verify_error)}")
+                  
+                  # Check if endpoint exists
+                  sagemaker = boto3.client('sagemaker')
+                  endpoint_exists = True
+                  
+                  try:
+                      sagemaker.describe_endpoint(EndpointName=endpoint_name)
+                      logger.info(f"[ImageMetricsLambda] Endpoint {endpoint_name} exists")
+                  except Exception as endpoint_error:
+                      logger.warning(f"[ImageMetricsLambda] Endpoint doesn't exist: {str(endpoint_error)}")
+                      endpoint_exists = False
+                      
+                      # Update DynamoDB to indicate no endpoint
+                      table.update_item(
+                          Key={'request_id': request_id},
+                          UpdateExpression='SET #status = :status, #message = :message',
+                          ExpressionAttributeNames={
+                              '#status': 'status',
+                              '#message': 'message'
+                          },
+                          ExpressionAttributeValues={
+                              ':status': 'NO_ENDPOINT',
+                              ':message': f"Endpoint {endpoint_name} not available"
+                          }
+                      )
+                      
+                      return {
+                          'statusCode': 200,
+                          'headers': cors_headers(),
+                          'body': json.dumps({
+                              'request_id': request_id,
+                              'status': 'READY_FOR_PROCESSING',
+                              'message': 'Input saved but endpoint not available. Will process when endpoint is ready.'
+                          })
                       }
-                  )
-                  logger.info(f"[ImageMetricsLambda] Updated DynamoDB with fid_inference_id={inference_id}")
-
+                  
+                  # Invoke SageMaker endpoint asynchronously
+                  if endpoint_exists:
+                      try:
+                          logger.info(f"[ImageMetricsLambda] Submitting async request to SageMaker: {endpoint_name}")
+                          sagemaker_runtime = boto3.client('sagemaker-runtime')
+                          
+                          async_response = sagemaker_runtime.invoke_endpoint_async(
+                              EndpointName=endpoint_name,
+                              ContentType='application/json',
+                              Accept='application/json',
+                              InputLocation=s3_input_path
+                          )
+                          
+                          # Get the SageMaker inference ID
+                          inference_id = async_response.get('InferenceId')
+                          logger.info(f"[ImageMetricsLambda] Received InferenceId: {inference_id}")
+                          
+                          # Update DynamoDB with the inference ID
+                          table.update_item(
+                              Key={'request_id': request_id},
+                              UpdateExpression='SET #status = :status, #inference_id = :inference_id',
+                              ExpressionAttributeNames={
+                                  '#status': 'status',
+                                  '#inference_id': 'sagemaker_inference_id'
+                              },
+                              ExpressionAttributeValues={
+                                  ':status': 'IN_PROGRESS',
+                                  ':inference_id': inference_id
+                              }
+                          )
+                          
+                          # Start processor Lambda to check status
+                          processor_lambda = os.environ.get('PROCESSOR_LAMBDA', '')
+                          if processor_lambda:
+                              logger.info(f"[ImageMetricsLambda] Invoking ProcessorLambda asynchronously")
+                              lambda_client = boto3.client('lambda')
+                              lambda_client.invoke(
+                                  FunctionName=processor_lambda,
+                                  InvocationType='Event',  # Asynchronous invocation
+                                  Payload=json.dumps({
+                                      'request_id': request_id,
+                                      'inference_id': inference_id,
+                                      'endpoint_name': endpoint_name,
+                                      's3_input_path': s3_input_path
+                                  })
+                              )
+                          
+                      except Exception as invoke_error:
+                          logger.error(f"[ImageMetricsLambda] Error invoking SageMaker: {str(invoke_error)}")
+                          
+                          # Update DynamoDB with error
+                          table.update_item(
+                              Key={'request_id': request_id},
+                              UpdateExpression='SET #status = :status, #error = :error',
+                              ExpressionAttributeNames={
+                                  '#status': 'status',
+                                  '#error': 'error'
+                              },
+                              ExpressionAttributeValues={
+                                  ':status': 'INVOCATION_FAILED',
+                                  ':error': f"SageMaker invocation failed: {str(invoke_error)}"
+                              }
+                          )
+                          
+                          return {
+                              'statusCode': 500,
+                              'headers': cors_headers(),
+                              'body': json.dumps({
+                                  'request_id': request_id,
+                                  'status': 'FAILED',
+                                  'error': f"Failed to invoke SageMaker endpoint: {str(invoke_error)}"
+                              })
+                          }
+                  
+                  # Return success response
                   return {
                       'statusCode': 200,
+                      'headers': cors_headers(),
                       'body': json.dumps({
-                          "message": "FID inference triggered",
-                          "inference_id": inference_id
+                          'request_id': request_id,
+                          'status': 'ACCEPTED',
+                          'message': 'FID calculation request accepted. Poll for results using the request_id.'
+                      })
+                  }
+                  
+              except Exception as e:
+                  logger.error(f"[ImageMetricsLambda] Unhandled exception: {str(e)}")
+                  return {
+                      'statusCode': 500,
+                      'headers': cors_headers(),
+                      'body': json.dumps({
+                          'error': f"Internal server error: {str(e)}"
                       })
                   }
 
-              except Exception as e:
-                  logger.error(f"[ImageMetricsLambda] ERROR: {e}", exc_info=True)
-                  return {
-                      'statusCode': 500,
-                      'body': json.dumps({"error": str(e)})
-                  }
+          def cors_headers():
+              """Return standard CORS headers"""
+              return {
+                  'Content-Type': 'application/json',
+                  'Access-Control-Allow-Origin': '*',
+                  'Access-Control-Allow-Headers': 'Content-Type',
+                  'Access-Control-Allow-Methods': 'OPTIONS,POST,GET'
+              }
 
       Environment:
         Variables:
