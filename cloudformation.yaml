@@ -465,10 +465,29 @@ Resources:
           import os
           import time
           import logging
+          from decimal import Decimal  # Add this import
 
           # Configure logging
           logger = logging.getLogger()
           logger.setLevel(logging.INFO)
+
+          # Helper class to convert floats to Decimal for DynamoDB
+          class DecimalEncoder(json.JSONEncoder):
+              def default(self, obj):
+                  if isinstance(obj, float):
+                      return Decimal(str(obj))
+                  return super(DecimalEncoder, self).default(obj)
+
+          def float_to_decimal(obj):
+              """Recursively convert floats to Decimal for DynamoDB compatibility"""
+              if isinstance(obj, float):
+                  return Decimal(str(obj))
+              elif isinstance(obj, dict):
+                  return {k: float_to_decimal(v) for k, v in obj.items()}
+              elif isinstance(obj, list):
+                  return [float_to_decimal(item) for item in obj]
+              else:
+                  return obj
 
           def handler(event, context):
               # Log the incoming event
@@ -568,6 +587,9 @@ Resources:
                                   # Update DynamoDB with completed status
                                   logger.info(f"Updating DynamoDB with completed status for request_id: {request_id}")
                                   
+                                  # *** KEY FIX: Convert all float values to Decimal for DynamoDB ***
+                                  result_for_dynamodb = float_to_decimal(result)
+                                  
                                   table.update_item(
                                       Key={'request_id': request_id},
                                       UpdateExpression='SET #status = :status, #data = :data, #updated_at = :updated_at, #output_path = :output_path',
@@ -579,7 +601,7 @@ Resources:
                                       },
                                       ExpressionAttributeValues={
                                           ':status': 'COMPLETED',
-                                          ':data': result,
+                                          ':data': result_for_dynamodb,  # Use the converted version
                                           ':updated_at': int(time.time()),
                                           ':output_path': f"s3://{s3_bucket_name}/{output_key}"
                                       }
@@ -716,6 +738,7 @@ Resources:
                       'message': 'Status check in progress'
                   })
               }
+
       Environment:
         Variables:
           DYNAMODB_TABLE: 'gan-text-to-image-dev-generation-jobs'  
@@ -1133,12 +1156,20 @@ Resources:
           import os
           import logging
           import boto3
+          from decimal import Decimal
 
           # Configure logging
           logger = logging.getLogger()
           logger.setLevel(logging.INFO)
 
           dynamodb = boto3.resource('dynamodb')
+
+          # Custom JSON encoder to handle Decimal values
+          class DecimalEncoder(json.JSONEncoder):
+              def default(self, obj):
+                  if isinstance(obj, Decimal):
+                      return float(obj)
+                  return super(DecimalEncoder, self).default(obj)
 
           def handler(event, context):
               table_name = os.environ.get('DYNAMODB_TABLE', '')
@@ -1175,7 +1206,7 @@ Resources:
                           'status': job.get('status', 'UNKNOWN'),
                           'data': job.get('data', {}),
                           'fid_inference_id': job.get('fid_inference_id', None)
-                      })
+                      }, cls=DecimalEncoder)  # Use the custom encoder here
                   }
 
               except Exception as e:
