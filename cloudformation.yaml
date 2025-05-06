@@ -1006,6 +1006,7 @@ Resources:
         Variables:
           ENVIRONMENT: !Ref EnvironmentName
           PROJECT_NAME: !Ref ProjectName
+          PROCESSOR_LAMBDA: !GetAtt ProcessorLambda.Arn
           DYNAMODB_TABLE: 'gan-text-to-image-dev-generation-jobs'
           SAGEMAKER_ENDPOINT_NAME: 'gan-ep-dev'
           S3_BUCKET_NAME: !Ref ModelArtifactBucket
