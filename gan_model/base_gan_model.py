@@ -309,7 +309,7 @@ def train_with_limited_resources(batch_size=32, num_epochs=10, subset_size=1000)
     
     for epoch in range(num_epochs):
         for i, data in enumerate(tqdm(dataloader)):
-            # (1) Update D network: maximize log(D(x)) + log(1 - D(G(z)))
+            # (1) D network: maximize log(D(x)) + log(1 - D(G(z)))
             # Train with real batch
             netD.zero_grad()
             real_images = data[0].to(DEVICE)
@@ -333,7 +333,7 @@ def train_with_limited_resources(batch_size=32, num_epochs=10, subset_size=1000)
             errD = errD_real + errD_fake
             optimizerD.step()
             
-            # (2) Update G network: maximize log(D(G(z)))
+            # (2)  G network: maximize log(D(G(z)))
             netG.zero_grad()
             # fake labels are real for generator cost
             label.fill_(1) 

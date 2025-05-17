@@ -4,7 +4,6 @@ import argparse
 import torch
 from torch.utils.data import DataLoader
 import numpy as np
-# !! Make sure t2i_moe_gan has the updated train_aurora_gan !!
 from t2i_moe_gan import train_aurora_gan, AuroraGenerator, AuroraDiscriminator
 
 # Import data processing utilities
@@ -70,15 +69,15 @@ def main():
                         help='Checkpoint saving interval (steps)')
 
     # Loss Weights / Hyperparameters
-    parser.add_argument('--r1_gamma', type=float, default=R1_GAMMA, # <-- Added R1
+    parser.add_argument('--r1_gamma', type=float, default=R1_GAMMA, # R1
                         help='Weight for R1 regularization')
-    parser.add_argument('--clip_weight_64', type=float, default=CLIP_WEIGHT_64, # <-- Added Clip 64
+    parser.add_argument('--clip_weight_64', type=float, default=CLIP_WEIGHT_64, # Clip 64
                        help='Weight for CLIP perceptual loss (64x64 output)')
-    parser.add_argument('--clip_weight_32', type=float, default=CLIP_WEIGHT_32, # <-- Added Clip 32
+    parser.add_argument('--clip_weight_32', type=float, default=CLIP_WEIGHT_32, # Clip 32
                        help='Weight for CLIP perceptual loss (32x32 output)')
-    parser.add_argument('--kl_weight', type=float, default=KL_WEIGHT, # <-- Added KL weight
+    parser.add_argument('--kl_weight', type=float, default=KL_WEIGHT, # KL weight
                         help='Weight for KL divergence loss of Bayesian router')
-    parser.add_argument('--balance_weight', type=float, default=BALANCE_WEIGHT, # <-- Added Balance weight
+    parser.add_argument('--balance_weight', type=float, default=BALANCE_WEIGHT, # Balance weight
                         help='Weight for MoE load balancing loss')
 
     args = parser.parse_args()

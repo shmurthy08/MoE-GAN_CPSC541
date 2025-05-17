@@ -245,13 +245,13 @@ def train_moe_with_clusters(train_dataset, val_dataset, epochs=10, lr=0.001, kl_
     # Initialize loss function (Cross-Entropy for expert classification)
     criterion = torch.nn.CrossEntropyLoss()
     
-    # ADDED: Balance loss weight
+    # Balance loss weight
     balance_weight = 0.001
     
     # Training statistics
     train_losses = []
     val_losses = []
-    balance_metrics = []  # ADDED: Track balance metrics
+    balance_metrics = []  # Track balance metrics
     
     print(f"Starting training for {epochs} epochs...")
 
@@ -261,9 +261,9 @@ def train_moe_with_clusters(train_dataset, val_dataset, epochs=10, lr=0.001, kl_
         # Training phase
         model.train()
         epoch_loss = 0
-        epoch_ce_loss = 0     # ADDED: Track CE loss separately
-        epoch_kl_loss = 0     # ADDED: Track KL loss separately
-        epoch_balance_loss = 0  # ADDED: Track balance loss separately
+        epoch_ce_loss = 0     # Track CE loss separately
+        epoch_kl_loss = 0     # Track KL loss separately
+        epoch_balance_loss = 0  # Track balance loss separately
         
         for batch_idx, (images, text_embeddings, cluster_labels) in enumerate(train_loader):
             text_embeddings = text_embeddings.to(DEVICE)
@@ -275,14 +275,14 @@ def train_moe_with_clusters(train_dataset, val_dataset, epochs=10, lr=0.001, kl_
             # Forward pass
             expert_probs, kl, logits = model.gating_network(text_embeddings)
             
-            # CHANGED: Compute loss components separately
+            # : Compute loss components separately
             ce_loss = criterion(logits, cluster_labels)
             kl_loss = kl_weight * kl
             
-            # ADDED: Compute expert balance loss
+            #  Compute expert balance loss
             balance_loss = compute_moe_balance_loss(expert_probs)
             
-            # CHANGED: Total loss with all components
+            # : Total loss with all components
             loss = ce_loss + kl_loss + balance_weight * balance_loss
             
             # Backward pass and optimization
@@ -291,11 +291,11 @@ def train_moe_with_clusters(train_dataset, val_dataset, epochs=10, lr=0.001, kl_
             
             # Update epoch losses
             epoch_loss += loss.item()
-            epoch_ce_loss += ce_loss.item()  # ADDED
-            epoch_kl_loss += kl_loss.item()  # ADDED
-            epoch_balance_loss += balance_loss.item()  # ADDED
+            epoch_ce_loss += ce_loss.item()  
+            epoch_kl_loss += kl_loss.item()  
+            epoch_balance_loss += balance_loss.item()  
             
-            # CHANGED: Print more detailed progress
+            # Print detailed progress
             if batch_idx % 10 == 0:
                 print(f"Epoch {epoch+1}/{epochs}, Batch {batch_idx}/{len(train_loader)}, "
                       f"Loss: {loss.item():.4f} ("
@@ -305,9 +305,9 @@ def train_moe_with_clusters(train_dataset, val_dataset, epochs=10, lr=0.001, kl_
         
         # Calculate average epoch losses
         epoch_loss /= len(train_loader)
-        epoch_ce_loss /= len(train_loader)  # ADDED
-        epoch_kl_loss /= len(train_loader)  # ADDED
-        epoch_balance_loss /= len(train_loader)  # ADDED
+        epoch_ce_loss /= len(train_loader)  
+        epoch_kl_loss /= len(train_loader)  
+        epoch_balance_loss /= len(train_loader) 
         
         train_losses.append(epoch_loss)
         
@@ -316,10 +316,10 @@ def train_moe_with_clusters(train_dataset, val_dataset, epochs=10, lr=0.001, kl_
         val_loss = 0
         val_correct = 0
         val_total = 0
-        val_balance_metric = 0  # ADDED: Track balance during validation
+        val_balance_metric = 0  #  Track balance during validation
         
         with torch.no_grad():
-            for batch_idx, (images, text_embeddings, cluster_labels) in enumerate(val_loader):  # FIXED: val_loader instead of train_loader
+            for batch_idx, (images, text_embeddings, cluster_labels) in enumerate(val_loader): 
                 # Move data to device
                 text_embeddings = text_embeddings.to(DEVICE)
                 cluster_labels = cluster_labels.to(DEVICE)
@@ -331,7 +331,7 @@ def train_moe_with_clusters(train_dataset, val_dataset, epochs=10, lr=0.001, kl_
                 ce_loss = criterion(logits, cluster_labels)
                 loss = ce_loss
                 
-                # ADDED: Monitor expert balance (but don't add to loss)
+                #  Monitor expert balance (but don't add to loss)
                 batch_balance = compute_moe_balance_loss(expert_probs).item()
                 val_balance_metric += batch_balance
                 
@@ -346,12 +346,12 @@ def train_moe_with_clusters(train_dataset, val_dataset, epochs=10, lr=0.001, kl_
         # Calculate average validation metrics
         val_loss /= len(val_loader)
         val_accuracy = val_correct / val_total
-        val_balance_metric /= len(val_loader)  # ADDED: Average balance metric
+        val_balance_metric /= len(val_loader)  #  Average balance metric
         
         val_losses.append(val_loss)
-        balance_metrics.append(val_balance_metric)  # ADDED: Track balance metrics
+        balance_metrics.append(val_balance_metric)  #  Track balance metrics
         
-        # CHANGED: Print more detailed epoch summary
+        # : Print more detailed epoch summary
         print(f"Epoch {epoch+1}/{epochs}, "
             f"Train Loss: {epoch_loss:.4f} ("
             f"CE: {epoch_ce_loss:.4f}, "
@@ -366,11 +366,11 @@ def train_moe_with_clusters(train_dataset, val_dataset, epochs=10, lr=0.001, kl_
         print(f"Saving model to {save_path}")
         torch.save(model.state_dict(), save_path)
     
-    # CHANGED: Return additional metrics
+    # : Return additional metrics
     return model, {
         'train_losses': train_losses, 
         'val_losses': val_losses,
-        'balance_metrics': balance_metrics  # ADDED
+        'balance_metrics': balance_metrics  # 
     }
 
 def visualize_training_results(training_stats, save_path=None):

@@ -561,6 +561,39 @@ Resources:
                                   # Parse JSON data
                                   result = json.loads(result_data)
                                   
+                                  # Check if this output contains FID score (has multiple images AND a fid_score field)
+                                  is_fid_output = False
+                                  if 'fid_score' in result and 'images' in result and len(result['images']) > 1:
+                                      is_fid_output = True
+                                      logger.info(f"Detected FID calculation output with score: {result['fid_score']}")
+                                  
+                                  # Check if the job was a FID calculation request based on DynamoDB
+                                  job_is_fid_request = False
+                                  if 'Item' in response and response['Item'].get('calculate_fid', False):
+                                      job_is_fid_request = True
+                                      
+                                  # If we're processing a FID job, make sure this output is a FID result
+                                  if job_is_fid_request and not is_fid_output:
+                                      logger.warning(f"Job is FID calculation but output doesn't have FID score. Checking again later.")
+                                      
+                                      # Wait before re-checking
+                                      time.sleep(5)
+                                      
+                                      # Re-invoke this Lambda to check status again
+                                      lambda_client = boto3.client('lambda')
+                                      lambda_client.invoke(
+                                          FunctionName=context.function_name,
+                                          InvocationType='Event',
+                                          Payload=json.dumps(event)
+                                      )
+                                      
+                                      return {
+                                          'statusCode': 200,
+                                          'body': json.dumps({
+                                              'message': 'Output file found, but not FID result yet. Checking again later.'
+                                          })
+                                      }
+                                      
                                   # Ensure we have the right data structure for the frontend
                                   if 'images' not in result:
                                       # Try to extract images from nested structures
@@ -587,8 +620,17 @@ Resources:
                                   # Update DynamoDB with completed status
                                   logger.info(f"Updating DynamoDB with completed status for request_id: {request_id}")
                                   
-                                  # *** KEY FIX: Convert all float values to Decimal for DynamoDB ***
+                                  # Convert all float values to Decimal for DynamoDB
                                   result_for_dynamodb = float_to_decimal(result)
+                                  
+                                  # Verify image count for FID output
+                                  if is_fid_output:
+                                      expected_image_count = response['Item'].get('num_samples', 4) if 'Item' in response else 4
+                                      actual_image_count = len(result['images'])
+                                      logger.info(f"FID output has {actual_image_count} images (expected approximately {expected_image_count})")
+                                      
+                                      # Continue processing even if counts don't match exactly
+                                      # FID processing might return a different number in some cases
                                   
                                   table.update_item(
                                       Key={'request_id': request_id},
@@ -601,7 +643,7 @@ Resources:
                                       },
                                       ExpressionAttributeValues={
                                           ':status': 'COMPLETED',
-                                          ':data': result_for_dynamodb,  # Use the converted version
+                                          ':data': result_for_dynamodb,
                                           ':updated_at': int(time.time()),
                                           ':output_path': f"s3://{s3_bucket_name}/{output_key}"
                                       }
@@ -612,7 +654,8 @@ Resources:
                                       'statusCode': 200,
                                       'body': json.dumps({
                                           'message': 'Processing completed successfully',
-                                          'output_path': f"s3://{s3_bucket_name}/{output_key}"
+                                          'output_path': f"s3://{s3_bucket_name}/{output_key}",
+                                          'is_fid_output': is_fid_output
                                       })
                                   }
                               except json.JSONDecodeError as json_err:
@@ -738,7 +781,6 @@ Resources:
                       'message': 'Status check in progress'
                   })
               }
-
       Environment:
         Variables:
           DYNAMODB_TABLE: 'gan-text-to-image-dev-generation-jobs'  
