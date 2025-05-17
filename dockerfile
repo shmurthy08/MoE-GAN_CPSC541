@@ -86,7 +86,7 @@ ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app:/app/data_processing:/app/scripts:/app/moegan
 ENV JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
 
-# IMPORTANT: Update handler service name to use correct module path
+# handler service name to use correct module path
 RUN echo '#!/usr/bin/env python3\n\
 from sagemaker_inference import model_server\n\
 \n\

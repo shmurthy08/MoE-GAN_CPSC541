@@ -128,7 +128,7 @@ class BayesianMoEGatingNetwork(nn.Module):
     Bayesian Mixture of Experts Gating Network that determines which expert to use
     for each input prompt, with uncertainty estimation through Bayesian techniques.
     """
-    # First, update the __init__ method to accept the text embedding dimension
+    # First,  the __init__ method to accept the text embedding dimension
     def __init__(self, input_dim, hidden_dim, num_experts, text_dim=None, num_samples=75):
         """
         Initialize Bayesian MoE Gating Network.

@@ -653,7 +653,6 @@ class GenerativeBlock(nn.Module):
             kl_losses: List to store KL losses
             annealing_factor: Temperature annealing factor for Bayesian router
         """
-        # ======== MODIFY FORWARD METHOD ========
         # Upsample if needed
         if self.upsample:
             x = self.up(x)
@@ -928,10 +927,10 @@ class AuroraGANLoss:
         """ Helper to compute CLIP loss, ensures text is encoded """
         if isinstance(text_input, str) or (isinstance(text_input, list) and isinstance(text_input[0], str)):
             # Use cached embeddings if possible, otherwise encode
-            # Assuming text_input are embeddings during training
+            # text_input are embeddings during training
              text_embeddings = text_input
         else:
-            text_embeddings = text_input # Assume they are already embeddings
+            text_embeddings = text_input # they are already embeddings
 
         if text_embeddings.device != images.device:
             text_embeddings = text_embeddings.to(images.device)
@@ -945,14 +944,14 @@ class AuroraGANLoss:
         # Wants mismatched_pred low (minimize softplus(mismatched_pred))
         d_loss_real = F.softplus(-real_pred).mean()
         d_loss_fake = F.softplus(fake_pred).mean()
-        d_loss_mismatched = F.softplus(mismatched_pred).mean() # Added mismatched loss term
+        d_loss_mismatched = F.softplus(mismatched_pred).mean() # mismatch loss term
 
         return d_loss_real + d_loss_fake + d_loss_mismatched # Combined loss
 
     def moe_balance_loss(self, routing_probs, balance_weight=0.01):
         """
         Load balancing loss for MoE following Switch Transformer paper.
-        Assumes routing_probs is a list, takes the last one (final layer).
+        routing_probs is a list, takes the last one (final layer).
         """
         if not routing_probs:
             return torch.tensor(0.0, device=self.device)
@@ -1689,7 +1688,6 @@ def sample_aurora_gan(generator, text_prompt, num_samples=1, truncation_psi=0.7,
             text_tokens = clip.tokenize(text_prompt).to(device)
             text_embeds = model.encode_text(text_tokens).float()  # Explicit conversion to float32
             
-            # KEY FIX: If generating multiple samples but only have one text embedding,
             # replicate the embedding to match the number of samples
             if num_samples > 1 and text_embeds.size(0) == 1:
                 text_embeds = text_embeds.repeat(num_samples, 1)
@@ -1699,7 +1697,6 @@ def sample_aurora_gan(generator, text_prompt, num_samples=1, truncation_psi=0.7,
         # If already tensor, ensure it's float32
         text_prompt = text_prompt.float()
         
-        # KEY FIX: If generating multiple samples but only have one text embedding,
         # replicate the embedding to match the number of samples
         if num_samples > 1 and text_prompt.size(0) == 1:
             text_prompt = text_prompt.repeat(num_samples, 1)
